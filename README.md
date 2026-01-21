@@ -37,3 +37,9 @@ macros:
 ```
 
 These settings are consistent with the VM's default configuration. In most cases, you do not need to change them. However, if you have a customized VM, please update this file to match your modifications.
+
+# Roadmap
+
+✅ Support all instructions in lampVM
+✅ Support labels
+Support a subset of C
