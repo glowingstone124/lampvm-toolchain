@@ -3,10 +3,10 @@ use std::fs::File;
 use std::io;
 use std::io::BufRead;
 use std::path::Path;
-use crate::config::ArchConfig;
-use crate::inst::inst;
-use crate::opcode::Opcode;
-use crate::parse::parse_operands;
+use crate::assemble::config::ArchConfig;
+use crate::assemble::inst::inst;
+use crate::assemble::opcode::Opcode;
+use crate::assemble::parse::parse_operands;
 
 fn clean_line(line: &str) -> &str {
     line.split(';').next().unwrap_or("").trim()

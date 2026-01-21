@@ -1,6 +1,6 @@
 # lampvm-toolchain
 
-Currently aligned VM version: [cc91b55](https://github.com/glowingstone124/lamp-vm/commit/cc91b55c6f99b274d47fb73f8e7bc2e1b68a0687)
+Currently aligned VM version: [0b8cb24](https://github.com/glowingstone124/lamp-vm/commit/0b8cb2469bb9b359d40eb41027f96eaf57858d3a)
 
 This is the assembler for [lampvm](https://github.com/glowingstone124/lamp-vm).
 
@@ -18,7 +18,7 @@ The assembler requires a config.yml file to be present in the current working di
 By default, the configuration should look like this:
 
 ```yml
-reg_count: 8
+reg_count: 32
 reg_prefix: "r"
 
 macros:

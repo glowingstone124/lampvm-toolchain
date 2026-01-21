@@ -1,6 +1,6 @@
-use crate::config::ArchConfig;
-use crate::inst::InstFormat;
 use std::collections::HashMap;
+use crate::assemble::config::ArchConfig;
+use crate::assemble::inst::InstFormat;
 
 pub fn parse_operands(format: InstFormat, args: &[&str], arch: &ArchConfig, labels: &HashMap<String,u32>) -> (u8, u8, u8, u32) {
     match format {

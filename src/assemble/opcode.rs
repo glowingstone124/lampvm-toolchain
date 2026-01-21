@@ -1,4 +1,4 @@
-use crate::inst::InstFormat;
+use crate::assemble::inst::InstFormat;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(u8)]
