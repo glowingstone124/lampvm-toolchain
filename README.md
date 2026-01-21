@@ -1,5 +1,7 @@
 # lampvm-toolchain
 
+Currently aligned VM version: (cc91b55)[https://github.com/glowingstone124/lamp-vm/commit/cc91b55c6f99b274d47fb73f8e7bc2e1b68a0687]
+
 This is the assembler for [lampvm](https://github.com/glowingstone124/lamp-vm).
 
 # Compilation
