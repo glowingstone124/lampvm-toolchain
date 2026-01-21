@@ -2,7 +2,7 @@ use crate::config::ArchConfig;
 use crate::inst::InstFormat;
 use std::collections::HashMap;
 
-pub fn parse_operands(format: InstFormat, args: &[&str], arch: &ArchConfig) -> (u8, u8, u8, u32) {
+pub fn parse_operands(format: InstFormat, args: &[&str], arch: &ArchConfig, labels: &HashMap<String,u32>) -> (u8, u8, u8, u32) {
     match format {
         InstFormat::None => {
             if !args.is_empty() {
@@ -34,7 +34,7 @@ pub fn parse_operands(format: InstFormat, args: &[&str], arch: &ArchConfig) -> (
             if args.len() != 1 {
                 panic!("I format expects imm");
             }
-            (0, 0, 0, parse_imm(args[0], arch))
+            (0, 0, 0, parse_imm(args[0], arch, labels))
         }
 
         InstFormat::Rd => {
@@ -52,14 +52,14 @@ pub fn parse_operands(format: InstFormat, args: &[&str], arch: &ArchConfig) -> (
                 parse_reg(args[0], arch),
                 parse_reg(args[1], arch),
                 0,
-                parse_imm(args[2], arch),
+                parse_imm(args[2], arch,labels),
             )
         }
         InstFormat::RdImm => {
             if args.len() != 2 {
                 panic!("RdImm expects rd, imm");
             }
-            (parse_reg(args[0], arch), 0, 0, parse_imm(args[1], arch))
+            (parse_reg(args[0], arch), 0, 0, parse_imm(args[1], arch, labels))
         }
         InstFormat::RdRsRsImm => {
             if args.len() != 4 {
@@ -69,7 +69,7 @@ pub fn parse_operands(format: InstFormat, args: &[&str], arch: &ArchConfig) -> (
                 parse_reg(args[0], arch),
                 parse_reg(args[1], arch),
                 parse_reg(args[2], arch),
-                parse_imm(args[3], arch),
+                parse_imm(args[3], arch, labels),
             )
         }
     }
@@ -85,9 +85,13 @@ pub fn parse_reg(s: &str, arch: &ArchConfig) -> u8 {
     r
 }
 
-pub fn parse_imm(s: &str,  arch: &ArchConfig) -> u32 {
+pub fn parse_imm(s: &str,  arch: &ArchConfig,labels: &HashMap<String, u32>) -> u32 {
     let expr = s.trim();
     if let Some (&val) = &arch.macros.get(expr) {
+        return val;
+    }
+
+    if let Some(&val) = labels.get(expr) {
         return val;
     }
 
@@ -99,22 +103,22 @@ pub fn parse_imm(s: &str,  arch: &ArchConfig) -> u32 {
         return num;
     }
 
-    parse_simple_expr(expr, &arch.macros)
+    parse_simple_expr(expr, &arch.macros, labels)
 }
 
-fn parse_simple_expr(expr: &str, macros: &HashMap<String, u32>) -> u32 {
+fn parse_simple_expr(expr: &str, macros: &HashMap<String, u32>, labels: &HashMap<String,u32>) -> u32 {
     let expr = expr.trim();
 
     if expr.starts_with("(") && expr.ends_with(")") {
-        return parse_simple_expr(&expr[1..expr.len() - 1], macros);
+        return parse_simple_expr(&expr[1..expr.len() - 1], macros, labels);
     }
 
     for op in ['+', '-'] {
         if let Some(pos) = expr.rfind(op) {
             let left = &expr[..pos];
             let right = &expr[pos + 1..];
-            let lv = parse_simple_expr(left, macros);
-            let rv = parse_simple_expr(right, macros);
+            let lv = parse_simple_expr(left, macros, labels);
+            let rv = parse_simple_expr(right, macros, labels);
             return match op {
                 '+' => lv + rv,
                 '-' => lv - rv,
@@ -126,8 +130,8 @@ fn parse_simple_expr(expr: &str, macros: &HashMap<String, u32>) -> u32 {
         if let Some(pos) = expr.rfind(op) {
             let left = &expr[..pos];
             let right = &expr[pos + 1..];
-            let lv = parse_simple_expr(left, macros);
-            let rv = parse_simple_expr(right, macros);
+            let lv = parse_simple_expr(left, macros, labels);
+            let rv = parse_simple_expr(right, macros, labels);
             return match op {
                 '*' => lv * rv,
                 '/' => lv / rv,
@@ -140,8 +144,15 @@ fn parse_simple_expr(expr: &str, macros: &HashMap<String, u32>) -> u32 {
         return val;
     }
 
+    if let Some(&val) = labels.get(expr) {
+        return val;
+    }
+
     if let Some(hex) = expr.strip_prefix("0x") {
         return u32::from_str_radix(hex, 16).expect("Invalid hex immediate");
     }
-    expr.parse::<u32>().expect("Invalid immediate")
+
+    expr.parse::<u32>().unwrap_or_else(|_| {
+        panic!("Invalid immediate or undefined label: '{}'", expr)
+    })
 }

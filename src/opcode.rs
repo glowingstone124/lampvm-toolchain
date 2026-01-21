@@ -16,8 +16,11 @@ pub enum Opcode {
     OP_CALL,
     OP_RET,
     OP_LOAD,
+    OP_LOAD32,
+    OP_LOADX32,
     OP_STORE,
     OP_STORE32,
+    OP_STOREX32,
     OP_CMP,
     OP_CMPI,
     OP_MOV,
@@ -47,45 +50,48 @@ pub enum Opcode {
 impl Opcode {
     pub fn parse(s: &str) -> Option<Self> {
         match s.to_uppercase().as_str() {
-            "ADD"     => Some(Opcode::OP_ADD),
-            "SUB"     => Some(Opcode::OP_SUB),
-            "MUL"     => Some(Opcode::OP_MUL),
-            "DIV"     => Some(Opcode::OP_DIV),
-            "HALT"    => Some(Opcode::OP_HALT),
-            "JMP"     => Some(Opcode::OP_JMP),
-            "JZ"      => Some(Opcode::OP_JZ),
-            "PUSH"    => Some(Opcode::OP_PUSH),
-            "POP"     => Some(Opcode::OP_POP),
-            "CALL"    => Some(Opcode::OP_CALL),
-            "RET"     => Some(Opcode::OP_RET),
-            "LOAD"    => Some(Opcode::OP_LOAD),
-            "STORE"   => Some(Opcode::OP_STORE),
+            "ADD" => Some(Opcode::OP_ADD),
+            "SUB" => Some(Opcode::OP_SUB),
+            "MUL" => Some(Opcode::OP_MUL),
+            "DIV" => Some(Opcode::OP_DIV),
+            "HALT" => Some(Opcode::OP_HALT),
+            "JMP" => Some(Opcode::OP_JMP),
+            "JZ" => Some(Opcode::OP_JZ),
+            "PUSH" => Some(Opcode::OP_PUSH),
+            "POP" => Some(Opcode::OP_POP),
+            "CALL" => Some(Opcode::OP_CALL),
+            "RET" => Some(Opcode::OP_RET),
+            "LOAD" => Some(Opcode::OP_LOAD),
+            "LOAD32" => Some(Opcode::OP_LOAD32),
+            "LOADX32" => Some(Opcode::OP_LOADX32),
+            "STORE" => Some(Opcode::OP_STORE),
             "STORE32" => Some(Opcode::OP_STORE32),
-            "CMP"     => Some(Opcode::OP_CMP),
-            "CMPI"   => Some(Opcode::OP_CMPI),
-            "MOV"     => Some(Opcode::OP_MOV),
-            "MOVI"    => Some(Opcode::OP_MOVI),
-            "MEMSET"  => Some(Opcode::OP_MEMSET),
-            "MEMCPY"  => Some(Opcode::OP_MEMCPY),
-            "IN"      => Some(Opcode::OP_IN),
-            "OUT"     => Some(Opcode::OP_OUT),
-            "INT"     => Some(Opcode::OP_INT),
-            "IRET"    => Some(Opcode::OP_IRET),
-            "MOD"     => Some(Opcode::OP_MOD),
-            "AND"     => Some(Opcode::OP_AND),
-            "OR"      => Some(Opcode::OP_OR),
-            "XOR"     => Some(Opcode::OP_XOR),
-            "NOT"     => Some(Opcode::OP_NOT),
-            "SHL"     => Some(Opcode::OP_SHL),
-            "SHR"     => Some(Opcode::OP_SHR),
-            "SAR"     => Some(Opcode::OP_SAR),
-            "JNZ"     => Some(Opcode::OP_JNZ),
-            "JG"      => Some(Opcode::OP_JG),
-            "JGE"     => Some(Opcode::OP_JGE),
-            "JL"      => Some(Opcode::OP_JL),
-            "JLE"     => Some(Opcode::OP_JLE),
-            "JC"      => Some(Opcode::OP_JC),
-            "JNC"     => Some(Opcode::OP_JNC),
+            "STOREX32" => Some(Opcode::OP_STOREX32),
+            "CMP" => Some(Opcode::OP_CMP),
+            "CMPI" => Some(Opcode::OP_CMPI),
+            "MOV" => Some(Opcode::OP_MOV),
+            "MOVI" => Some(Opcode::OP_MOVI),
+            "MEMSET" => Some(Opcode::OP_MEMSET),
+            "MEMCPY" => Some(Opcode::OP_MEMCPY),
+            "IN" => Some(Opcode::OP_IN),
+            "OUT" => Some(Opcode::OP_OUT),
+            "INT" => Some(Opcode::OP_INT),
+            "IRET" => Some(Opcode::OP_IRET),
+            "MOD" => Some(Opcode::OP_MOD),
+            "AND" => Some(Opcode::OP_AND),
+            "OR" => Some(Opcode::OP_OR),
+            "XOR" => Some(Opcode::OP_XOR),
+            "NOT" => Some(Opcode::OP_NOT),
+            "SHL" => Some(Opcode::OP_SHL),
+            "SHR" => Some(Opcode::OP_SHR),
+            "SAR" => Some(Opcode::OP_SAR),
+            "JNZ" => Some(Opcode::OP_JNZ),
+            "JG" => Some(Opcode::OP_JG),
+            "JGE" => Some(Opcode::OP_JGE),
+            "JL" => Some(Opcode::OP_JL),
+            "JLE" => Some(Opcode::OP_JLE),
+            "JC" => Some(Opcode::OP_JC),
+            "JNC" => Some(Opcode::OP_JNC),
             _ => None,
         }
     }
@@ -101,15 +107,15 @@ impl Opcode {
             | Opcode::OP_OR
             | Opcode::OP_XOR => InstFormat::RdRsRs,
 
-            Opcode::OP_MOV
-            | Opcode::OP_NOT
-            | Opcode::OP_CMP
-            | Opcode::OP_IN
-            | Opcode:: OP_OUT => InstFormat::RdRs,
+            Opcode::OP_MOV | Opcode::OP_NOT | Opcode::OP_CMP | Opcode::OP_IN | Opcode::OP_OUT => {
+                InstFormat::RdRs
+            }
 
             Opcode::OP_SHL
             | Opcode::OP_SHR
             | Opcode::OP_LOAD
+            | Opcode::OP_LOAD32
+            | Opcode::OP_STORE32
             | Opcode::OP_STORE
             | Opcode::OP_MEMSET
             | Opcode::OP_MEMCPY => InstFormat::RdRsImm,
@@ -124,18 +130,13 @@ impl Opcode {
             | Opcode::OP_JNC
             | Opcode::OP_CALL => InstFormat::I,
 
-            Opcode::OP_PUSH
-            | Opcode::OP_INT => InstFormat::Rd,
+            Opcode::OP_PUSH | Opcode::OP_INT => InstFormat::Rd,
 
-            Opcode::OP_STORE32 => InstFormat::RdRsRsImm,
+            Opcode::OP_STOREX32 | Opcode::OP_LOADX32 => InstFormat::RdRsRsImm,
 
-            Opcode::OP_HALT
-            | Opcode::OP_POP
-            | Opcode::OP_RET
-            | Opcode::OP_IRET => InstFormat::None,
+            Opcode::OP_HALT | Opcode::OP_POP | Opcode::OP_RET | Opcode::OP_IRET => InstFormat::None,
 
-            Opcode::OP_CMPI |
-            Opcode::OP_MOVI => InstFormat::RdImm,
+            Opcode::OP_CMPI | Opcode::OP_MOVI => InstFormat::RdImm,
             _ => panic!("Unknown opcode"),
         }
     }
