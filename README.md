@@ -1,6 +1,6 @@
 # lampvm-toolchain
 
-Currently aligned VM version: (cc91b55)[https://github.com/glowingstone124/lamp-vm/commit/cc91b55c6f99b274d47fb73f8e7bc2e1b68a0687]
+Currently aligned VM version: [cc91b55](https://github.com/glowingstone124/lamp-vm/commit/cc91b55c6f99b274d47fb73f8e7bc2e1b68a0687)
 
 This is the assembler for [lampvm](https://github.com/glowingstone124/lamp-vm).
 
@@ -43,5 +43,7 @@ These settings are consistent with the VM's default configuration. In most cases
 # Roadmap
 
 ✅ Support all instructions in lampVM
+
 ✅ Support labels
+
 Support a subset of C
