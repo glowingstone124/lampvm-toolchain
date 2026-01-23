@@ -6,10 +6,14 @@ mod assemble{
     pub mod opcode;
     pub mod parse;
 }
-use crate::assemble::config::ArchConfig;
+
+mod compiler {
+    pub mod compiler;
+    pub mod tokenizer;
+}
 use std::{fs, path::Path, fs::File, io::Write};
 use clap::{Parser, Subcommand};
-use crate::assemble::assemble::assemble_file;
+use crate::compiler::compiler::compile;
 
 #[derive(Parser, Debug)]
 #[command(author = "Glowingstone", version = "0.01", about = "lampVM's toolchain", long_about = None)]
@@ -78,8 +82,8 @@ fn main() {
 
         Commands::Cc { input } => {
             println!("C compile mode: {}", input);
-
-            let output_file = input.trim_end_matches(".c");
+            let content = fs::read_to_string(input).expect("Failed to read file");
+            compile(&content);
         }
     }
 }

@@ -35,7 +35,7 @@ impl ArchConfig {
 impl Default for ArchConfig {
     fn default() -> Self {
         ArchConfig {
-            reg_count: 8,
+            reg_count: 32,
             reg_prefix: "r".to_string(),
             macros: Default::default(),
         }
