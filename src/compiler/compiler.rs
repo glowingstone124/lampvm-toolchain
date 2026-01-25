@@ -1,6 +1,7 @@
 use std::collections::HashMap;
 use std::fmt::format;
 use std::thread::sleep;
+use crate::assemble::config;
 use crate::compiler::tokenizer::{Token, TokenKind, Tokenizer};
 
 #[derive(Debug, Clone, PartialEq)]
@@ -69,6 +70,7 @@ enum Stmt {
     Block(Vec<Stmt>),
     ExprStmt(Option<Expr>),
     Decl(Vec<(usize, Option<Expr>)>),
+    InlineAsm(String),
 }
 
 #[derive(Debug, Clone)]
@@ -98,6 +100,10 @@ enum ExprKind {
         base: Box<Expr>,
         index: Box<Expr>,
     },
+    Cast {
+        ty: Type,
+        expr: Box<Expr>,
+    }
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -339,6 +345,16 @@ impl Parser {
     }
 
     fn parse_stmt(&mut self) -> Stmt {
+        if self.consume_keyword("asm") {
+            self.expect_punct("(");
+            let s = match self.next().kind {
+                TokenKind::Str(k) => k,
+                _ => panic!("asm() expects a string literal"),
+            };
+            self.expect_punct(")");
+            self.expect_punct(";");
+            return Stmt::InlineAsm(s);
+        }
         if self.consume_keyword("return") {
             if self.consume_punct(";") {
                 return Stmt::Return(None);
@@ -637,9 +653,29 @@ impl Parser {
                 },
             };
         }
-        self.parse_postfix()
+        self.parse_cast()
     }
 
+    fn parse_cast(&mut self) -> Expr {
+        if self.consume_punct("(") {
+            if self.peek_is_type() || matches!(self.peek().kind, TokenKind::Keyword(ref k) if k == "void") {
+                let base = self.parse_type_spec();
+                let mut ty = base;
+                while self.consume_punct("*") {
+                    ty = Type::Ptr(Box::new(ty));
+                }
+                self.expect_punct(")");
+                let expr =self.parse_unary();
+                return Expr {
+                    kind: ExprKind::Cast {
+                        ty, expr: Box::new(expr),
+                    }
+                }
+            }
+            self.idx -= 1;
+        }
+        self.parse_postfix()
+    }
     fn parse_postfix(&mut self) -> Expr {
         let mut node = self.parse_primary();
         loop {
@@ -746,7 +782,54 @@ impl<'a> Codegen<'a> {
         self.label += 1;
         l
     }
+    fn try_gen_builtin_call(&mut self, name: &str, args: &[Expr], func: &Function) -> bool {
+        match name {
+            "__setregister" => {
+                self.gen_builtin_setregister(args, func);
+                return true;
+            }
+            _ => false
+        }
+    }
+    fn gen_builtin_setregister(&mut self, args: &[Expr], func: &Function) {
+        if args.len() != 2 {
+            panic!("__setregister expects 2 arguments: (__setregister(regId, data))");
+        }
 
+        let reg_id = match args[0].kind {
+            ExprKind::Num(n) => n,
+            _ => panic!("__setregister: registerId must be a constant number (e.g. __setregister(1, x))"),
+        };
+
+        if reg_id < 0 || reg_id > 31 {
+            panic!(
+                "__setregister: registerId out of range, expected {} to {} but found {}",
+                0, 31, reg_id
+            );
+        }
+
+        let rid = reg_id as i32;
+
+        if rid == 30 {
+            panic!("__setregister: r30 is reserved");
+        }
+
+        /*
+        We do a judgment here. If we have an immediate number, then the fastest way is to call MOVI.
+        On the other side, when we get an expression, we will calculate it, save its value to r0, and do a mov.
+        */
+        match &args[1].kind {
+            ExprKind::Num(n) => {
+                self.emit(format!("movi r{}, {}", rid, *n as i32));
+            }
+            _ => {
+                self.gen_expr(&args[1], func);
+                if rid != 0 {
+                    self.emit(format!("mov r{}, r0", rid));
+                }
+            }
+        }
+    }
     fn gen_program(&mut self, prog: &Program) {
         self.emit("movi r30, DATA_STACK_BASE + DATA_STACK_SIZE");
         self.emit("call main");
@@ -801,6 +884,13 @@ impl<'a> Codegen<'a> {
 
     fn gen_stmt(&mut self, stmt: &Stmt, func: &Function, ret_label: &str) {
         match stmt {
+            Stmt::InlineAsm(s) => {
+                for line in s.lines() {
+                    let t = line.trim();
+                    if t.is_empty() {continue;}
+                    self.emit(t.to_string());
+                }
+            }
             Stmt::Return(expr) => {
                 if let Some(e) = expr {
                     self.gen_expr(e, func);
@@ -841,11 +931,15 @@ impl<'a> Codegen<'a> {
                     self.gen_stmt(s, func, ret_label);
                 }
             }
-            Stmt::ExprStmt(expr) => {
-                if let Some(e) = expr {
-                    self.gen_expr(e, func);
+            Stmt::ExprStmt(Some(e)) => {
+                if let ExprKind::Call { name, args } = &e.kind {
+                    if self.try_gen_builtin_call(name, args, func) {
+                        return;
+                    }
                 }
+                self.gen_expr(e, func);
             }
+
             Stmt::Decl(vars) => {
                 for (id, init) in vars {
                     if let Some(expr) = init {
@@ -854,6 +948,8 @@ impl<'a> Codegen<'a> {
                         self.emit(format!("store32 [r30 + {}], r0", offset));
                     }
                 }
+            },
+            Stmt::ExprStmt(None) => {
             }
         }
     }
@@ -890,6 +986,11 @@ impl<'a> Codegen<'a> {
                 self.gen_unary(*op, expr, func);
             }
             ExprKind::Call { name, args } => {
+
+                if (self.try_gen_builtin_call(name, args, func)) {
+                    self.emit("movi r0, 0");
+                    return;
+                }
                 if args.len() > 8 {
                     panic!("More than 8 arguments not supported");
                 }
@@ -905,6 +1006,9 @@ impl<'a> Codegen<'a> {
             ExprKind::Index { base, index } => {
                 self.gen_lvalue(expr, func);
                 self.emit("load32 r0, [r0]");
+            }
+            ExprKind::Cast { expr: inner, .. } => {
+                self.gen_expr(inner, func);
             }
         }
     }
@@ -1164,6 +1268,9 @@ impl<'a> Codegen<'a> {
                 Type::Array(elem, _) => (*elem).clone(),
                 _ => panic!("Indexing non-pointer/array"),
             },
+            ExprKind::Cast {
+                ty, ..
+            } => ty.clone(),
         }
     }
 
