@@ -1,8 +1,8 @@
 # lampvm-toolchain
 
-Currently aligned VM version: [5090225](https://github.com/glowingstone124/lamp-vm/commit/5090225ad0405472c9a365b310fea188be7b07ba)
+Currently aligned VM version: [c4bbaec62cddf3ae512e699b7faaa1fe90e74253](https://github.com/glowingstone124/lamp-vm/commit/c4bbaec62cddf3ae512e699b7faaa1fe90e74253)
 
-This is the assembler for [lampvm](https://github.com/glowingstone124/lamp-vm).
+This is the development toolchain for [lampvm](https://github.com/glowingstone124/lamp-vm).
 
 # Compilation
 
@@ -13,6 +13,19 @@ cargo build --release
 ```
 
 # Basic Usage
+
+For assemble:
+```bash
+./bin asm --input program.asm --output program.bin
+```
+
+For compile C code:
+```bash
+./bin cc main.c
+```
+
+Detailed information for C is in [document](/docs/CCompiler.md)
+
 The assembler requires a config.yml file to be present in the current working directory.
 
 By default, the configuration should look like this:

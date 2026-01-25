@@ -130,11 +130,11 @@ impl Opcode {
             | Opcode::OP_JNC
             | Opcode::OP_CALL => InstFormat::I,
 
-            Opcode::OP_PUSH | Opcode::OP_INT => InstFormat::Rd,
+            Opcode::OP_PUSH | Opcode::OP_POP | Opcode::OP_INT => InstFormat::Rd,
 
             Opcode::OP_STOREX32 | Opcode::OP_LOADX32 => InstFormat::RdRsRsImm,
 
-            Opcode::OP_HALT | Opcode::OP_POP | Opcode::OP_RET | Opcode::OP_IRET => InstFormat::None,
+            Opcode::OP_HALT | Opcode::OP_RET | Opcode::OP_IRET => InstFormat::None,
 
             Opcode::OP_CMPI | Opcode::OP_MOVI => InstFormat::RdImm,
             _ => panic!("Unknown opcode"),

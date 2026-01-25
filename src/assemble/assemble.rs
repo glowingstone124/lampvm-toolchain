@@ -88,3 +88,40 @@ pub fn assemble_file<P: AsRef<Path>>(path: P, arch: &ArchConfig) -> Vec<u64> {
 
     program
 }
+
+pub fn assemble_string(input: &str, arch: &ArchConfig) -> Vec<u64> {
+    let lines: Vec<String> = input.lines().map(|s| s.to_string()).collect();
+
+    let mut labels: HashMap<String, u32> = HashMap::new();
+    let mut program: Vec<u64> = Vec::new();
+
+    const INST_SIZE: u32 = 8;
+
+    let mut pc = arch.macros.get("PROGRAM_BASE").expect("No PROGRAM_BASE found").clone();
+
+    for line in &lines {
+        let clean = clean_line(line);
+        if clean.is_empty() { continue; }
+        let (label_opt, inst_part) = split_label(clean);
+
+        if let Some(label) = label_opt {
+            if labels.insert(label.to_string(), pc).is_some() {
+                panic!("Duplicate label definition: {}", label);
+            }
+        }
+        if !inst_part.is_empty() {
+            pc += INST_SIZE;
+        }
+    }
+
+    for line in &lines {
+        let clean = clean_line(line);
+        if clean.is_empty() { continue; }
+        let (_, inst_part) = split_label(clean);
+        if inst_part.is_empty() { continue; }
+        if let Some(inst64) = assemble_line(inst_part, arch, &labels) {
+            program.push(inst64);
+        }
+    }
+    program
+}
