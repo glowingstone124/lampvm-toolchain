@@ -1,6 +1,7 @@
 #[derive(Debug, Clone, PartialEq)]
 pub enum TokenKind {
     Num(i64),
+    Float(f32),
     Ident(String),
     Keyword(String),
     Punct(String),
@@ -13,6 +14,11 @@ pub struct Token {
     pub kind: TokenKind,
     pub pos: usize, // byte offset
 }
+
+const KEYWORDS: [&str; 10] = [
+    "char", "int", "long", "float", "void",
+    "return", "if", "else", "while", "asm",
+];
 
 pub struct Tokenizer<'a> {
     input: &'a str,
@@ -126,17 +132,79 @@ impl<'a> Tokenizer<'a> {
             return Token { kind: TokenKind::Str(lit), pos: start_pos };
         }
 
-        // number (decimal only)
+        // number (decimal/hex, with optional float syntax for decimal)
         if c.is_ascii_digit() {
-            let mut num = 0i64;
+            if self.starts_with("0x") || self.starts_with("0X") {
+                self.pos += 2;
+                let mut hex = String::new();
+                while let Some(ch) = self.peek_char() {
+                    if ch.is_ascii_hexdigit() {
+                        hex.push(ch);
+                        self.bump();
+                    } else {
+                        break;
+                    }
+                }
+                if hex.is_empty() {
+                    panic!("Invalid hex literal");
+                }
+                let num = i64::from_str_radix(&hex, 16).expect("Invalid hex literal");
+                return Token { kind: TokenKind::Num(num), pos: start_pos };
+            }
+
+            let mut s = String::new();
             while let Some(ch) = self.peek_char() {
                 if ch.is_ascii_digit() {
-                    num = num * 10 + (ch as i64 - '0' as i64);
+                    s.push(ch);
                     self.bump();
                 } else {
                     break;
                 }
             }
+
+            let mut is_float = false;
+            if self.peek_char() == Some('.') {
+                is_float = true;
+                s.push('.');
+                self.bump();
+                while let Some(ch) = self.peek_char() {
+                    if ch.is_ascii_digit() {
+                        s.push(ch);
+                        self.bump();
+                    } else {
+                        break;
+                    }
+                }
+            }
+
+            if matches!(self.peek_char(), Some('e') | Some('E')) {
+                is_float = true;
+                s.push('e');
+                self.bump();
+                if matches!(self.peek_char(), Some('+') | Some('-')) {
+                    s.push(self.bump().unwrap());
+                }
+                let mut has_exp_digit = false;
+                while let Some(ch) = self.peek_char() {
+                    if ch.is_ascii_digit() {
+                        has_exp_digit = true;
+                        s.push(ch);
+                        self.bump();
+                    } else {
+                        break;
+                    }
+                }
+                if !has_exp_digit {
+                    panic!("Invalid float literal exponent");
+                }
+            }
+
+            if is_float {
+                let val = s.parse::<f32>().expect("Invalid float literal");
+                return Token { kind: TokenKind::Float(val), pos: start_pos };
+            }
+
+            let num = s.parse::<i64>().expect("Invalid integer literal");
             return Token { kind: TokenKind::Num(num), pos: start_pos };
         }
 
@@ -151,11 +219,10 @@ impl<'a> Tokenizer<'a> {
                     break;
                 }
             }
-            let kind = match ident.as_str() {
-                "int" | "return" | "if" | "else" | "while" | "void" | "asm" => {
-                    TokenKind::Keyword(ident)
-                }
-                _ => TokenKind::Ident(ident),
+            let kind = if KEYWORDS.contains(&ident.as_str()) {
+                TokenKind::Keyword(ident)
+            } else {
+                TokenKind::Ident(ident)
             };
             return Token { kind, pos: start_pos };
         }

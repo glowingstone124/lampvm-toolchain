@@ -9,6 +9,7 @@ mod assemble {
 mod compiler {
     pub mod compiler;
     pub mod tokenizer;
+    pub mod parser;
 }
 
 use clap::{Parser, Subcommand};
@@ -18,6 +19,7 @@ use std::io::Write;
 use std::path::Path;
 
 use crate::assemble::config::ArchConfig;
+use crate::assemble::assemble::AssembledProgram;
 use crate::compiler::compiler::compile;
 
 #[derive(Parser, Debug)]
@@ -54,14 +56,15 @@ fn main() {
             println!("Using architecture: {:?}", arch);
 
             println!("Assembling {}...", input);
-            let program = assemble::assemble::assemble_file(&input, &arch);
-            println!("Assembly finished. {} instructions generated.", program.len());
+            let program = assemble::assemble::assemble_file_with_sections(&input, &arch);
+            println!("Assembly finished. {} instructions generated.", program.text.len());
 
-            for (i, inst) in program.iter().enumerate() {
+            for (i, inst) in program.text.iter().enumerate() {
                 println!("{}: 0x{:016X}", i, inst);
             }
 
-            write_program_bin(&program, &output);
+            write_program_bin(&program.text, &output);
+            write_data_and_layout(&program, &output);
         }
 
         Commands::Cc { input } => {
@@ -71,16 +74,17 @@ fn main() {
             println!("Using architecture: {:?}", arch);
 
             let content = fs::read_to_string(&input).expect("Failed to read file");
-            let asm_text = compile(&content);
+            let asm_text = compile(&content, &arch);
             println!("Compile finished. asm text length = {} chars", asm_text.len());
             println!("Result:\n{}", asm_text);
 
             println!("Assembling code...");
-            let program = assemble::assemble::assemble_string(&asm_text, &arch);
-            println!("Assembly finished. {} instructions generated.", program.len());
+            let program = assemble::assemble::assemble_string_with_sections(&asm_text, &arch);
+            println!("Assembly finished. {} instructions generated.", program.text.len());
 
             let output_name = replace_suffix_or_append(&input, ".c", ".bin");
-            write_program_bin(&program, &output_name);
+            write_program_bin(&program.text, &output_name);
+            write_data_and_layout(&program, &output_name);
 
             println!("Output: {}", output_name);
         }
@@ -120,4 +124,27 @@ fn write_program_bin(binary: &[u64], output: &str) {
     }
     bin_file.flush().expect("Failed to flush output file");
     println!("Binary written to {}", output);
+}
+
+fn write_data_and_layout(program: &AssembledProgram, output: &str) {
+    if !program.data.is_empty() {
+        let data_output = replace_suffix_or_append(output, ".bin", ".data");
+        let mut data_file = File::create(&data_output).expect("Failed to create data output file");
+        data_file.write_all(&program.data).expect("Failed to write data segment");
+        data_file.flush().expect("Failed to flush data output file");
+        println!("Data segment written to {}", data_output);
+    }
+
+    let layout_output = replace_suffix_or_append(output, ".bin", ".layout");
+    let layout = format!(
+        "TEXT_BASE=0x{0:08X}\nTEXT_SIZE={1}\nDATA_BASE=0x{2:08X}\nDATA_SIZE={3}\nBSS_BASE=0x{4:08X}\nBSS_SIZE={5}\n",
+        program.text_base,
+        (program.text.len() as u32) * 8,
+        program.data_base,
+        program.data.len() as u32,
+        program.bss_base,
+        program.bss_size,
+    );
+    fs::write(&layout_output, layout).expect("Failed to write layout file");
+    println!("Layout written to {}", layout_output);
 }

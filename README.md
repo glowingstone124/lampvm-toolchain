@@ -1,6 +1,6 @@
 # lampvm-toolchain
 
-Currently aligned VM version: [c4bbaec62cddf3ae512e699b7faaa1fe90e74253](https://github.com/glowingstone124/lamp-vm/commit/c4bbaec62cddf3ae512e699b7faaa1fe90e74253)
+Currently aligned VM version: [e4f005467fb6eaaa5cedb5b2352c642aacf1a811](https://github.com/glowingstone124/lamp-vm/commit/e4f005467fb6eaaa5cedb5b2352c642aacf1a811)
 
 This is the development toolchain for [lampvm](https://github.com/glowingstone124/lamp-vm).
 
@@ -49,7 +49,7 @@ macros:
   FB_HEIGHT: 480
   FB_BPP: 4
   FB_SIZE: 1228800
-  FB_BASE: 0x2D4000
+  FB_BASE: 0x400000
 ```
 
 These settings are consistent with the VM's default configuration. In most cases, you do not need to change them. However, if you have a customized VM, please update this file to match your modifications.

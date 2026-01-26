@@ -13,14 +13,15 @@ This document describes the syntax accepted by the current compiler implementati
 - Block comments: `/* ... */` (not nested). Unterminated block comments are not diagnosed explicitly.
 
 ### 1.3 Tokens
-- **Keywords**: `int`, `void`, `return`, `if`, `else`, `while`
+- **Keywords**: `char`, `int`, `long`, `float`, `void`, `return`, `if`, `else`, `while`, `asm`
 - **Identifiers**: `[A-Za-z_][A-Za-z0-9_]*`
-- **Integer literals**: **decimal only** (`0` or `[1-9][0-9]*`)
+- **Integer literals**: decimal or hex (`0x...`)
+- **Float literals**: decimal with fractional and/or exponent parts (e.g. `1.0`, `3.14`, `2e3`, `4.2e-1`)
 - **Punctuators/operators**:
   - Two‑char: `==` `!=` `<=` `>=` `&&` `||`
   - Single‑char: `+ - * / ( ) { } [ ] , ; < > = & !`
 
-Not supported by the tokenizer: character literals, string literals, hex/octal literals, `++`, `--`, `->`, `.` , `%`, bitwise operators, `?:`, `sizeof`.
+Not supported by the tokenizer: character literals, string literals, octal literals, `++`, `--`, `->`, `.` , `%`, bitwise operators, `?:`, `sizeof`.
 
 ## 2. Grammar (EBNF)
 
@@ -28,9 +29,11 @@ The grammar below reflects the parser in `src/compiler/compiler.rs`.
 
 ### 2.1 Top Level
 ```
-program           ::= function_def*
+program           ::= (function_def | global_decl)*
 
 function_def      ::= type_spec declarator "(" param_list? ")" block
+
+global_decl       ::= type_spec declarator ("=" const_expr)? ("," declarator ("=" const_expr)?)* ";"
 
 param_list        ::= "void"                 // only valid as single parameter list
                     | param ("," param)*
@@ -40,7 +43,7 @@ param             ::= type_spec declarator
 
 ### 2.2 Declarations and Types
 ```
-type_spec         ::= "int" | "void"
+type_spec         ::= "char" | "int" | "long" | "float" | "void"
 
 // Declarator supports pointers and fixed-size arrays.
 // Arrays are only written as a suffix after the name.
@@ -51,12 +54,12 @@ array_suffix      ::= "[" int_literal "]"
 
 block             ::= "{" stmt* "}"
 
-decl_stmt         ::= "int" declarator ("=" expr)? ("," declarator ("=" expr)?)* ";"
+decl_stmt         ::= type_spec declarator ("=" expr)? ("," declarator ("=" expr)?)* ";"
 ```
 
 Notes:
-- Only `int` declarations are allowed in statement position; `void` is not allowed for local variables.
-- There are **no global variables**, only function definitions at the top level.
+- `void` is not allowed for local or global variables.
+- Top-level supports **function definitions** and **global variables**.
 - Parameter arrays decay to pointers.
 
 ### 2.3 Statements
@@ -98,11 +101,15 @@ add               ::= mul (("+" | "-") mul)*
 mul               ::= unary (("*" | "/") unary)*
 
 unary             ::= ("+" | "-" | "&" | "*" | "!") unary
+                    | cast
                     | postfix
+
+cast              ::= "(" type_spec ptr* ")" unary
 
 postfix           ::= primary ("[" expr "]")*
 
 primary           ::= int_literal
+                    | float_literal
                     | ident
                     | ident "(" arg_list? ")"
                     | "(" expr ")"
@@ -110,18 +117,22 @@ primary           ::= int_literal
 arg_list          ::= expr ("," expr)*
 ```
 
-Not supported: comma operator in expressions, `%`, bitwise ops, `++/--`, `sizeof`, casts, `?:`, member access, string/char literals.
+Not supported: comma operator in expressions, `%`, bitwise ops, `++/--`, `sizeof`, `?:`, member access, string/char literals.
 
 ## 3. Semantics and Limits
 
 ### 3.1 Types
-- `int`, `void`, pointers (`*`), and fixed‑size arrays (`[N]`).
+- `char`, `int`, `long`, `float`, `void`, pointers (`*`), and fixed‑size arrays (`[N]`).
 - Array size must be a **decimal integer literal**.
 - Array types decay to pointers in parameter lists and in expression contexts.
+ - `char` is 1 byte. `int`, `long`, `float`, pointers are 4 bytes and aligned to 4-byte boundaries.
+ - `LOAD`/`STORE` are used for `char`; `LOAD32`/`STORE32` are used for 32-bit types.
 
 ### 3.2 Variables and Scope
 - Block scope with shadowing; implemented via nested scopes.
-- No global variables.
+- Global variables are supported at top level.
+  - Initializers must be constant expressions (numeric literals with `+ - * /` and casts).
+  - Array global initializers are not supported yet.
 
 ### 3.3 Functions
 - Function definitions only; no prototypes.
@@ -152,7 +163,7 @@ Errors are raised via `panic!` with simple messages, e.g.
 ## 5. Not Implemented (Explicit)
 
 - Preprocessor (`#include`, `#define`, ...)
-- `char`, `short`, `long`, `float`, `double`
+- `short`, `double`
 - `struct`, `enum`, `typedef`, `const`, `static`, `extern`
 - `for`, `do`, `switch`, `break`, `continue`
 - `%`, bitwise ops, `?:`, `sizeof`, casts

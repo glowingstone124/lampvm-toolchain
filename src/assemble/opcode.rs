@@ -46,6 +46,18 @@ pub enum Opcode {
     OP_JLE,
     OP_JC,
     OP_JNC,
+    OP_FADD,
+    OP_FSUB,
+    OP_FMUL,
+    OP_FDIV,
+    OP_FNEG,
+    OP_FABS,
+    OP_FSQRT,
+    OP_FCMP,
+    OP_ITOF,
+    OP_FTOI,
+    OP_FLOAD32,
+    OP_FSTORE32
 }
 impl Opcode {
     pub fn parse(s: &str) -> Option<Self> {
@@ -92,6 +104,18 @@ impl Opcode {
             "JLE" => Some(Opcode::OP_JLE),
             "JC" => Some(Opcode::OP_JC),
             "JNC" => Some(Opcode::OP_JNC),
+            "FADD" => Some(Opcode::OP_FADD),
+            "FSUB" => Some(Opcode::OP_FSUB),
+            "FMUL" => Some(Opcode::OP_FMUL),
+            "FDIV" => Some(Opcode::OP_FDIV),
+            "FNEG" => Some(Opcode::OP_FNEG),
+            "FABS" => Some(Opcode::OP_FABS),
+            "FSQRT" => Some(Opcode::OP_FSQRT),
+            "FCMP" => Some(Opcode::OP_FCMP),
+            "ITOF" => Some(Opcode::OP_ITOF),
+            "FTOI" => Some(Opcode::OP_FTOI),
+            "FLOAD32" => Some(Opcode::OP_FLOAD32),
+            "FSTORE32" => Some(Opcode::OP_FSTORE32),
             _ => None,
         }
     }
@@ -105,9 +129,23 @@ impl Opcode {
             | Opcode::OP_MOD
             | Opcode::OP_AND
             | Opcode::OP_OR
-            | Opcode::OP_XOR => InstFormat::RdRsRs,
+            | Opcode::OP_XOR
+            | Opcode::OP_FADD
+            | Opcode::OP_FSUB
+            | Opcode::OP_FMUL
+            | Opcode::OP_FDIV => InstFormat::RdRsRs,
 
-            Opcode::OP_MOV | Opcode::OP_NOT | Opcode::OP_CMP | Opcode::OP_IN | Opcode::OP_OUT => {
+            Opcode::OP_MOV
+            | Opcode::OP_NOT
+            | Opcode::OP_CMP
+            | Opcode::OP_IN
+            | Opcode::OP_OUT
+            | Opcode::OP_FNEG
+            | Opcode::OP_FABS
+            | Opcode::OP_FSQRT
+            | Opcode::OP_FCMP
+            | Opcode::OP_ITOF
+            | Opcode::OP_FTOI => {
                 InstFormat::RdRs
             }
 
@@ -118,7 +156,9 @@ impl Opcode {
             | Opcode::OP_STORE32
             | Opcode::OP_STORE
             | Opcode::OP_MEMSET
-            | Opcode::OP_MEMCPY => InstFormat::RdRsImm,
+            | Opcode::OP_MEMCPY
+            | Opcode::OP_FLOAD32
+            | Opcode::OP_FSTORE32 => InstFormat::RdRsImm,
 
             Opcode::OP_JMP
             | Opcode::OP_JZ

@@ -1,12 +1,13 @@
 use std::collections::HashMap;
-use std::fmt::format;
-use std::thread::sleep;
-use crate::assemble::config;
-use crate::compiler::tokenizer::{Token, TokenKind, Tokenizer};
-
+use crate::assemble::config::ArchConfig;
+use crate::compiler::tokenizer::{TokenKind, Tokenizer};
+use crate::compiler::parser::{Parser};
 #[derive(Debug, Clone, PartialEq)]
-enum Type {
+pub enum Type {
+    Char,
     Int,
+    Long,
+    Float,
     Void,
     Ptr(Box<Type>),
     Array(Box<Type>, usize),
@@ -16,17 +17,20 @@ impl Type {
     fn size(&self) -> usize {
         match self {
             Type::Int => 4,
+            Type::Long => 4,
+            Type::Float => 4,
+            Type::Char => 1,
             Type::Void => 0,
             Type::Ptr(_) => 4,
             Type::Array(elem, n) => elem.size() * *n,
         }
     }
 
-    fn is_array(&self) -> bool {
+    pub(crate) fn is_array(&self) -> bool {
         matches!(self, Type::Array(_, _))
     }
 
-    fn decay(&self) -> Type {
+    pub(crate) fn decay(&self) -> Type {
         match self {
             Type::Array(elem, _) => Type::Ptr(elem.clone()),
             _ => self.clone(),
@@ -35,28 +39,42 @@ impl Type {
 }
 
 #[derive(Debug, Clone)]
-struct Var {
+pub struct Var {
     name: String,
     ty: Type,
     offset: i32,
 }
 
 #[derive(Debug, Clone)]
-struct Function {
-    name: String,
-    params: Vec<usize>,
-    locals: Vec<Var>,
-    body: Stmt,
-    ret_type: Type,
+pub enum ConstValue {
+    Int(i64),
+    Float(f32),
 }
 
 #[derive(Debug, Clone)]
-struct Program {
-    funcs: Vec<Function>,
+pub struct Global {
+    pub(crate) name: String,
+    pub(crate) ty: Type,
+    pub(crate) init: Option<ConstValue>,
 }
 
 #[derive(Debug, Clone)]
-enum Stmt {
+pub struct Function {
+    pub(crate) name: String,
+    pub(crate) params: Vec<usize>,
+    pub(crate) locals: Vec<Var>,
+    pub(crate) body: Stmt,
+    pub(crate) ret_type: Type,
+}
+
+#[derive(Debug, Clone)]
+pub struct Program {
+    pub(crate) funcs: Vec<Function>,
+    pub(crate) globals: Vec<Global>,
+}
+
+#[derive(Debug, Clone)]
+pub enum Stmt {
     Return(Option<Expr>),
     If {
         cond: Expr,
@@ -74,14 +92,17 @@ enum Stmt {
 }
 
 #[derive(Debug, Clone)]
-struct Expr {
-    kind: ExprKind,
+pub struct Expr {
+    pub(crate) kind: ExprKind,
 }
 
 #[derive(Debug, Clone)]
-enum ExprKind {
+pub enum ExprKind {
     Num(i64),
+    Float(f32),
+    Str(String),
     Var(usize),
+    GlobalVar(String),
     Assign(Box<Expr>, Box<Expr>),
     Binary {
         op: BinOp,
@@ -107,7 +128,7 @@ enum ExprKind {
 }
 
 #[derive(Debug, Clone, Copy)]
-enum BinOp {
+pub enum BinOp {
     Add,
     Sub,
     Mul,
@@ -123,7 +144,7 @@ enum BinOp {
 }
 
 #[derive(Debug, Clone, Copy)]
-enum UnOp {
+pub enum UnOp {
     Pos,
     Neg,
     Addr,
@@ -131,21 +152,15 @@ enum UnOp {
     Not,
 }
 
-struct Parser {
-    tokens: Vec<Token>,
-    idx: usize,
-    func_builder: Option<FuncBuilder>,
-    func_types: HashMap<String, Type>,
-}
 
-struct FuncBuilder {
-    locals: Vec<Var>,
+pub struct FuncBuilder {
+    pub(crate) locals: Vec<Var>,
     scopes: Vec<HashMap<String, usize>>,
-    params: Vec<usize>,
+    pub(crate) params: Vec<usize>,
 }
 
 impl FuncBuilder {
-    fn new() -> Self {
+    pub(crate) fn new() -> Self {
         FuncBuilder {
             locals: Vec::new(),
             scopes: vec![HashMap::new()],
@@ -153,15 +168,15 @@ impl FuncBuilder {
         }
     }
 
-    fn enter_scope(&mut self) {
+    pub(crate) fn enter_scope(&mut self) {
         self.scopes.push(HashMap::new());
     }
 
-    fn exit_scope(&mut self) {
+    pub(crate) fn exit_scope(&mut self) {
         self.scopes.pop();
     }
 
-    fn add_var(&mut self, name: String, ty: Type) -> usize {
+    pub(crate) fn add_var(&mut self, name: String, ty: Type) -> usize {
         let id = self.locals.len();
         self.locals.push(Var {
             name: name.clone(),
@@ -174,7 +189,7 @@ impl FuncBuilder {
         id
     }
 
-    fn find_var(&self, name: &str) -> Option<usize> {
+    pub(crate) fn find_var(&self, name: &str) -> Option<usize> {
         for scope in self.scopes.iter().rev() {
             if let Some(id) = scope.get(name) {
                 return Some(*id);
@@ -184,567 +199,12 @@ impl FuncBuilder {
     }
 }
 
-impl Parser {
-    fn new(tokens: Vec<Token>) -> Self {
-        Parser {
-            tokens,
-            idx: 0,
-            func_builder: None,
-            func_types: HashMap::new(),
-        }
-    }
-
-    fn at_eof(&self) -> bool {
-        matches!(self.peek().kind, TokenKind::Eof)
-    }
-
-    fn peek(&self) -> &Token {
-        &self.tokens[self.idx]
-    }
-
-    fn next(&mut self) -> Token {
-        let tok = self.tokens[self.idx].clone();
-        self.idx += 1;
-        tok
-    }
-
-    fn consume_punct(&mut self, s: &str) -> bool {
-        if let TokenKind::Punct(p) = &self.peek().kind {
-            if p == s {
-                self.next();
-                return true;
-            }
-        }
-        false
-    }
-
-    fn expect_punct(&mut self, s: &str) {
-        if !self.consume_punct(s) {
-            panic!("Expected punct '{}'", s);
-        }
-    }
-
-    fn consume_keyword(&mut self, s: &str) -> bool {
-        if let TokenKind::Keyword(k) = &self.peek().kind {
-            if k == s {
-                self.next();
-                return true;
-            }
-        }
-        false
-    }
-
-    fn expect_ident(&mut self) -> String {
-        match &self.next().kind {
-            TokenKind::Ident(name) => name.clone(),
-            _ => panic!("Expected identifier"),
-        }
-    }
-
-    fn parse_type_spec(&mut self) -> Type {
-        if self.consume_keyword("int") {
-            Type::Int
-        } else if self.consume_keyword("void") {
-            Type::Void
-        } else {
-            panic!("Expected type specifier");
-        }
-    }
-
-    fn parse_declarator(&mut self, base: Type) -> (Type, String) {
-        let mut ty = base;
-        while self.consume_punct("*") {
-            ty = Type::Ptr(Box::new(ty));
-        }
-        let name = self.expect_ident();
-        while self.consume_punct("[") {
-            let n = match self.next().kind {
-                TokenKind::Num(v) => v as usize,
-                _ => panic!("Expected array size"),
-            };
-            self.expect_punct("]");
-            ty = Type::Array(Box::new(ty), n);
-        }
-        (ty, name)
-    }
-
-    fn parse_program(&mut self) -> Program {
-        let mut funcs = Vec::new();
-        while !self.at_eof() {
-            let func = self.parse_function();
-            self.func_types.insert(func.name.clone(), func.ret_type.clone());
-            funcs.push(func);
-        }
-        Program { funcs }
-    }
-
-    fn parse_function(&mut self) -> Function {
-        let ret_type = self.parse_type_spec();
-        let (ret_type, name) = {
-            let (ty, name) = self.parse_declarator(ret_type);
-            (ty, name)
-        };
-        self.expect_punct("(");
-
-        let mut builder = FuncBuilder::new();
-
-        if !self.consume_punct(")") {
-            if self.consume_keyword("void") && self.consume_punct(")") {
-            } else {
-                loop {
-                    let base = self.parse_type_spec();
-                    let (mut ty, name) = self.parse_declarator(base);
-                    if ty.is_array() {
-                        ty = ty.decay();
-                    }
-                    let id = builder.add_var(name, ty);
-                    builder.params.push(id);
-                    if self.consume_punct(")") {
-                        break;
-                    }
-                    self.expect_punct(",");
-                }
-            }
-        }
-
-        self.func_builder = Some(builder);
-        let body = self.parse_block_stmt();
-        let mut builder = self.func_builder.take().unwrap();
-        let mut locals = builder.locals;
-
-        assign_offsets(&mut locals, &builder.params);
-
-        Function {
-            name,
-            params: builder.params,
-            locals,
-            body,
-            ret_type,
-        }
-    }
-
-    fn parse_block_stmt(&mut self) -> Stmt {
-        self.expect_punct("{");
-
-        {
-            let builder = self.func_builder.as_mut().expect("parse_block_stmt called outside of function");
-            builder.enter_scope();
-        }
-
-        let mut stmts = Vec::new();
-        while !self.consume_punct("}") {
-            stmts.push(self.parse_stmt());
-        }
-
-        {
-            let builder = self.func_builder.as_mut().expect("parse_block_stmt called outside of function");
-            builder.exit_scope();
-        }
-
-        Stmt::Block(stmts)
-    }
-
-    fn parse_stmt(&mut self) -> Stmt {
-        if self.consume_keyword("asm") {
-            self.expect_punct("(");
-            let s = match self.next().kind {
-                TokenKind::Str(k) => k,
-                _ => panic!("asm() expects a string literal"),
-            };
-            self.expect_punct(")");
-            self.expect_punct(";");
-            return Stmt::InlineAsm(s);
-        }
-        if self.consume_keyword("return") {
-            if self.consume_punct(";") {
-                return Stmt::Return(None);
-            }
-            let expr = self.parse_expr();
-            self.expect_punct(";");
-            return Stmt::Return(Some(expr));
-        }
-        if self.consume_keyword("if") {
-            self.expect_punct("(");
-            let cond = self.parse_expr();
-            self.expect_punct(")");
-            let then_branch = Box::new(self.parse_stmt());
-            let else_branch = if self.consume_keyword("else") {
-                Some(Box::new(self.parse_stmt()))
-            } else {
-                None
-            };
-            return Stmt::If {
-                cond,
-                then_branch,
-                else_branch,
-            };
-        }
-        if self.consume_keyword("while") {
-            self.expect_punct("(");
-            let cond = self.parse_expr();
-            self.expect_punct(")");
-            let body = Box::new(self.parse_stmt());
-            return Stmt::While { cond, body };
-        }
-        if self.consume_punct("{") {
-            self.idx -= 1;
-            return self.parse_block_stmt();
-        }
-        if self.peek_is_type() {
-            return self.parse_decl_stmt();
-        }
-        if self.consume_punct(";") {
-            return Stmt::ExprStmt(None);
-        }
-        let expr = self.parse_expr();
-        self.expect_punct(";");
-        Stmt::ExprStmt(Some(expr))
-    }
-
-    fn peek_is_type(&self) -> bool {
-        matches!(
-            self.peek().kind,
-            TokenKind::Keyword(ref k) if k == "int"
-        )
-    }
-
-    fn parse_decl_stmt(&mut self) -> Stmt {
-        let base = self.parse_type_spec();
-        let mut decls = Vec::new();
-        loop {
-            let (ty, name) = self.parse_declarator(base.clone());
-            let id = self
-                .func_builder
-                .as_mut()
-                .unwrap()
-                .add_var(name, ty);
-            let init = if self.consume_punct("=") {
-                Some(self.parse_expr())
-            } else {
-                None
-            };
-            decls.push((id, init));
-            if self.consume_punct(";") {
-                break;
-            }
-            self.expect_punct(",");
-        }
-        Stmt::Decl(decls)
-    }
-
-    fn parse_expr(&mut self) -> Expr {
-        self.parse_assign()
-    }
-
-    fn parse_assign(&mut self) -> Expr {
-        let mut node = self.parse_logical_or();
-        if self.consume_punct("=") {
-            let rhs = self.parse_assign();
-            node = Expr {
-                kind: ExprKind::Assign(Box::new(node), Box::new(rhs)),
-            };
-        }
-        node
-    }
-
-    fn parse_logical_or(&mut self) -> Expr {
-        let mut node = self.parse_logical_and();
-        while self.consume_punct("||") {
-            let rhs = self.parse_logical_and();
-            node = Expr {
-                kind: ExprKind::Binary {
-                    op: BinOp::Or,
-                    lhs: Box::new(node),
-                    rhs: Box::new(rhs),
-                },
-            };
-        }
-        node
-    }
-
-    fn parse_logical_and(&mut self) -> Expr {
-        let mut node = self.parse_equality();
-        while self.consume_punct("&&") {
-            let rhs = self.parse_equality();
-            node = Expr {
-                kind: ExprKind::Binary {
-                    op: BinOp::And,
-                    lhs: Box::new(node),
-                    rhs: Box::new(rhs),
-                },
-            };
-        }
-        node
-    }
-
-    fn parse_equality(&mut self) -> Expr {
-        let mut node = self.parse_relational();
-        loop {
-            if self.consume_punct("==") {
-                let rhs = self.parse_relational();
-                node = Expr {
-                    kind: ExprKind::Binary {
-                        op: BinOp::Eq,
-                        lhs: Box::new(node),
-                        rhs: Box::new(rhs),
-                    },
-                };
-            } else if self.consume_punct("!=") {
-                let rhs = self.parse_relational();
-                node = Expr {
-                    kind: ExprKind::Binary {
-                        op: BinOp::Ne,
-                        lhs: Box::new(node),
-                        rhs: Box::new(rhs),
-                    },
-                };
-            } else {
-                break;
-            }
-        }
-        node
-    }
-
-    fn parse_relational(&mut self) -> Expr {
-        let mut node = self.parse_add();
-        loop {
-            if self.consume_punct("<") {
-                let rhs = self.parse_add();
-                node = Expr {
-                    kind: ExprKind::Binary {
-                        op: BinOp::Lt,
-                        lhs: Box::new(node),
-                        rhs: Box::new(rhs),
-                    },
-                };
-            } else if self.consume_punct("<=") {
-                let rhs = self.parse_add();
-                node = Expr {
-                    kind: ExprKind::Binary {
-                        op: BinOp::Le,
-                        lhs: Box::new(node),
-                        rhs: Box::new(rhs),
-                    },
-                };
-            } else if self.consume_punct(">") {
-                let rhs = self.parse_add();
-                node = Expr {
-                    kind: ExprKind::Binary {
-                        op: BinOp::Gt,
-                        lhs: Box::new(node),
-                        rhs: Box::new(rhs),
-                    },
-                };
-            } else if self.consume_punct(">=") {
-                let rhs = self.parse_add();
-                node = Expr {
-                    kind: ExprKind::Binary {
-                        op: BinOp::Ge,
-                        lhs: Box::new(node),
-                        rhs: Box::new(rhs),
-                    },
-                };
-            } else {
-                break;
-            }
-        }
-        node
-    }
-
-    fn parse_add(&mut self) -> Expr {
-        let mut node = self.parse_mul();
-        loop {
-            if self.consume_punct("+") {
-                let rhs = self.parse_mul();
-                node = Expr {
-                    kind: ExprKind::Binary {
-                        op: BinOp::Add,
-                        lhs: Box::new(node),
-                        rhs: Box::new(rhs),
-                    },
-                };
-            } else if self.consume_punct("-") {
-                let rhs = self.parse_mul();
-                node = Expr {
-                    kind: ExprKind::Binary {
-                        op: BinOp::Sub,
-                        lhs: Box::new(node),
-                        rhs: Box::new(rhs),
-                    },
-                };
-            } else {
-                break;
-            }
-        }
-        node
-    }
-
-    fn parse_mul(&mut self) -> Expr {
-        let mut node = self.parse_unary();
-        loop {
-            if self.consume_punct("*") {
-                let rhs = self.parse_unary();
-                node = Expr {
-                    kind: ExprKind::Binary {
-                        op: BinOp::Mul,
-                        lhs: Box::new(node),
-                        rhs: Box::new(rhs),
-                    },
-                };
-            } else if self.consume_punct("/") {
-                let rhs = self.parse_unary();
-                node = Expr {
-                    kind: ExprKind::Binary {
-                        op: BinOp::Div,
-                        lhs: Box::new(node),
-                        rhs: Box::new(rhs),
-                    },
-                };
-            } else {
-                break;
-            }
-        }
-        node
-    }
-
-    fn parse_unary(&mut self) -> Expr {
-        if self.consume_punct("+") {
-            let expr = self.parse_unary();
-            return Expr {
-                kind: ExprKind::Unary {
-                    op: UnOp::Pos,
-                    expr: Box::new(expr),
-                },
-            };
-        }
-        if self.consume_punct("-") {
-            let expr = self.parse_unary();
-            return Expr {
-                kind: ExprKind::Unary {
-                    op: UnOp::Neg,
-                    expr: Box::new(expr),
-                },
-            };
-        }
-        if self.consume_punct("&") {
-            let expr = self.parse_unary();
-            return Expr {
-                kind: ExprKind::Unary {
-                    op: UnOp::Addr,
-                    expr: Box::new(expr),
-                },
-            };
-        }
-        if self.consume_punct("*") {
-            let expr = self.parse_unary();
-            return Expr {
-                kind: ExprKind::Unary {
-                    op: UnOp::Deref,
-                    expr: Box::new(expr),
-                },
-            };
-        }
-        if self.consume_punct("!") {
-            let expr = self.parse_unary();
-            return Expr {
-                kind: ExprKind::Unary {
-                    op: UnOp::Not,
-                    expr: Box::new(expr),
-                },
-            };
-        }
-        self.parse_cast()
-    }
-
-    fn parse_cast(&mut self) -> Expr {
-        if self.consume_punct("(") {
-            if self.peek_is_type() || matches!(self.peek().kind, TokenKind::Keyword(ref k) if k == "void") {
-                let base = self.parse_type_spec();
-                let mut ty = base;
-                while self.consume_punct("*") {
-                    ty = Type::Ptr(Box::new(ty));
-                }
-                self.expect_punct(")");
-                let expr =self.parse_unary();
-                return Expr {
-                    kind: ExprKind::Cast {
-                        ty, expr: Box::new(expr),
-                    }
-                }
-            }
-            self.idx -= 1;
-        }
-        self.parse_postfix()
-    }
-    fn parse_postfix(&mut self) -> Expr {
-        let mut node = self.parse_primary();
-        loop {
-            if self.consume_punct("[") {
-                let index = self.parse_expr();
-                self.expect_punct("]");
-                node = Expr {
-                    kind: ExprKind::Index {
-                        base: Box::new(node),
-                        index: Box::new(index),
-                    },
-                };
-                continue;
-            }
-            break;
-        }
-        node
-    }
-
-    fn parse_primary(&mut self) -> Expr {
-        if self.consume_punct("(") {
-            let expr = self.parse_expr();
-            self.expect_punct(")");
-            return expr;
-        }
-        if let TokenKind::Num(n) = &self.peek().kind {
-            let n = *n;
-            self.next();
-            return Expr {
-                kind: ExprKind::Num(n),
-            };
-        }
-        match &self.peek().kind {
-            TokenKind::Ident(_) => {
-                let name = self.expect_ident();
-                if self.consume_punct("(") {
-                    let mut args = Vec::new();
-                    if !self.consume_punct(")") {
-                        loop {
-                            args.push(self.parse_expr());
-                            if self.consume_punct(")") {
-                                break;
-                            }
-                            self.expect_punct(",");
-                        }
-                    }
-                    return Expr {
-                        kind: ExprKind::Call { name, args },
-                    };
-                }
-                let id = self
-                    .func_builder
-                    .as_ref()
-                    .unwrap()
-                    .find_var(&name)
-                    .unwrap_or_else(|| panic!("Undefined variable: {}", name));
-                Expr {
-                    kind: ExprKind::Var(id),
-                }
-            }
-            _ => panic!("Unexpected token in primary"),
-        }
-    }
-}
-
-fn assign_offsets(locals: &mut [Var], params: &[usize]) {
+pub fn assign_offsets(locals: &mut [Var], params: &[usize]) {
     let mut offset = 4i32;
     for &id in params {
         let size = locals[id].ty.size() as i32;
+        let align = if size >= 4 { 4 } else { 1 };
+        offset = align_up(offset, align);
         locals[id].offset = offset;
         offset += size;
     }
@@ -753,8 +213,26 @@ fn assign_offsets(locals: &mut [Var], params: &[usize]) {
             continue;
         }
         let size = var.ty.size() as i32;
+        let align = if size >= 4 { 4 } else { 1 };
+        offset = align_up(offset, align);
         var.offset = offset;
         offset += size;
+    }
+}
+
+fn align_up(value: i32, align: i32) -> i32 {
+    if align <= 1 {
+        value
+    } else {
+        ((value + align - 1) / align) * align
+    }
+}
+
+fn align_up_u32(value: u32, align: u32) -> u32 {
+    if align <= 1 {
+        value
+    } else {
+        ((value + align - 1) / align) * align
     }
 }
 
@@ -762,14 +240,22 @@ struct Codegen<'a> {
     out: Vec<String>,
     label: usize,
     func_types: &'a HashMap<String, Type>,
+    global_types: &'a HashMap<String, Type>,
+    globals: &'a [Global],
 }
 
 impl<'a> Codegen<'a> {
-    fn new(func_types: &'a HashMap<String, Type>) -> Self {
+    fn new(
+        func_types: &'a HashMap<String, Type>,
+        global_types: &'a HashMap<String, Type>,
+        globals: &'a [Global],
+    ) -> Self {
         Codegen {
             out: Vec::new(),
             label: 0,
             func_types,
+            global_types,
+            globals,
         }
     }
 
@@ -781,6 +267,82 @@ impl<'a> Codegen<'a> {
         let l = format!("{}_{}", prefix, self.label);
         self.label += 1;
         l
+    }
+
+    fn is_float_type(ty: &Type) -> bool {
+        matches!(ty, Type::Float)
+    }
+
+    fn is_char_type(ty: &Type) -> bool {
+        matches!(ty, Type::Char)
+    }
+
+    fn emit_load_var(&mut self, ty: &Type, offset: i32) {
+        if Self::is_char_type(ty) {
+            self.emit(format!("load r0, [r30 + {}]", offset));
+        } else {
+            self.emit(format!("load32 r0, [r30 + {}]", offset));
+        }
+    }
+
+    fn emit_store_var(&mut self, ty: &Type, offset: i32) {
+        if Self::is_char_type(ty) {
+            self.emit(format!("store [r30 + {}], r0", offset));
+        } else {
+            self.emit(format!("store32 [r30 + {}], r0", offset));
+        }
+    }
+
+    fn emit_load_from_addr(&mut self, ty: &Type, addr_reg: &str) {
+        if Self::is_char_type(ty) {
+            self.emit(format!("load r0, [{}]", addr_reg));
+        } else {
+            self.emit(format!("load32 r0, [{}]", addr_reg));
+        }
+    }
+
+    fn emit_store_to_addr(&mut self, ty: &Type, addr_reg: &str) {
+        if Self::is_char_type(ty) {
+            self.emit(format!("store [{}], r0", addr_reg));
+        } else {
+            self.emit(format!("store32 [{}], r0", addr_reg));
+        }
+    }
+
+    fn emit_cmp_zero_for_type(&mut self, ty: &Type) {
+        if Self::is_float_type(ty) {
+            self.emit("movi r1, 0");
+            self.emit("fcmp r0, r1");
+        } else {
+            self.emit("cmpi r0, 0");
+        }
+    }
+
+    fn cast_reg(&mut self, from: &Type, to: &Type) {
+        if from == to {
+            return;
+        }
+        match (from, to) {
+            (Type::Float, Type::Float) => {}
+            (Type::Ptr(_), Type::Float) | (Type::Float, Type::Ptr(_)) => {
+                panic!("Pointer/float cast not supported");
+            }
+            (Type::Float, _) => {
+                self.emit("ftoi r0, r0");
+                if matches!(to, Type::Char) {
+                    self.emit("movi r2, 255");
+                    self.emit("and r0, r0, r2");
+                }
+            }
+            (_, Type::Float) => {
+                self.emit("itof r0, r0");
+            }
+            (_, Type::Char) => {
+                self.emit("movi r2, 255");
+                self.emit("and r0, r0, r2");
+            }
+            _ => {}
+        }
     }
     fn try_gen_builtin_call(&mut self, name: &str, args: &[Expr], func: &Function) -> bool {
         match name {
@@ -822,6 +384,10 @@ impl<'a> Codegen<'a> {
             ExprKind::Num(n) => {
                 self.emit(format!("movi r{}, {}", rid, *n as i32));
             }
+            ExprKind::Float(f) => {
+                let bits = f.to_bits();
+                self.emit(format!("movi r{}, {}", rid, bits));
+            }
             _ => {
                 self.gen_expr(&args[1], func);
                 if rid != 0 {
@@ -831,11 +397,76 @@ impl<'a> Codegen<'a> {
         }
     }
     fn gen_program(&mut self, prog: &Program) {
-        self.emit("movi r30, DATA_STACK_BASE + DATA_STACK_SIZE");
+        self.emit(".text");
+        self.emit("movi r30, MEM_SIZE");
         self.emit("call main");
         self.emit("halt");
         for func in &prog.funcs {
             self.gen_function(func);
+        }
+        self.gen_globals();
+    }
+
+    fn gen_globals(&mut self) {
+        if self.globals.is_empty() {
+            return;
+        }
+
+        let mut data_lines: Vec<String> = Vec::new();
+        let mut bss_lines: Vec<String> = Vec::new();
+        let mut data_offset: u32 = 0;
+        let mut bss_offset: u32 = 0;
+
+        for g in self.globals {
+            let size = g.ty.size() as u32;
+            let align = if size >= 4 { 4 } else { 1 };
+            if let Some(init) = &g.init {
+                let aligned = align_up_u32(data_offset, align);
+                if aligned > data_offset {
+                    data_lines.push(format!(".zero {}", aligned - data_offset));
+                    data_offset = aligned;
+                }
+                data_lines.push(format!("{}:", g.name));
+                match (&g.ty, init) {
+                    (Type::Char, ConstValue::Int(v)) => {
+                        data_lines.push(format!(".byte {}", (*v as i32) & 0xFF));
+                    }
+                    (Type::Int | Type::Long | Type::Ptr(_), ConstValue::Int(v)) => {
+                        data_lines.push(format!(".long {}", *v as i32));
+                    }
+                    (Type::Float, ConstValue::Float(f)) => {
+                        data_lines.push(format!(".long {}", f.to_bits()));
+                    }
+                    (Type::Float, ConstValue::Int(v)) => {
+                        let f = *v as f32;
+                        data_lines.push(format!(".long {}", f.to_bits()));
+                    }
+                    _ => panic!("Unsupported global initializer for {}", g.name),
+                }
+                data_offset += size;
+            } else {
+                let aligned = align_up_u32(bss_offset, align);
+                if aligned > bss_offset {
+                    bss_lines.push(format!(".zero {}", aligned - bss_offset));
+                    bss_offset = aligned;
+                }
+                bss_lines.push(format!("{}:", g.name));
+                bss_lines.push(format!(".zero {}", size));
+                bss_offset += size;
+            }
+        }
+
+        if !data_lines.is_empty() {
+            self.emit(".data");
+            for line in data_lines {
+                self.emit(line);
+            }
+        }
+        if !bss_lines.is_empty() {
+            self.emit(".bss");
+            for line in bss_lines {
+                self.emit(line);
+            }
         }
     }
 
@@ -855,7 +486,12 @@ impl<'a> Codegen<'a> {
                 panic!("More than 8 parameters not supported");
             }
             let offset = func.locals[param_id].offset;
-            self.emit(format!("store32 [r30 + {}], r{}", offset, i));
+            let ty = &func.locals[param_id].ty;
+            if Self::is_char_type(ty) {
+                self.emit(format!("store [r30 + {}], r{}", offset, i));
+            } else {
+                self.emit(format!("store32 [r30 + {}], r{}", offset, i));
+            }
         }
 
         self.gen_stmt(&func.body, func, &ret_label);
@@ -879,7 +515,7 @@ impl<'a> Codegen<'a> {
                 max = end;
             }
         }
-        max
+        align_up(max, 4)
     }
 
     fn gen_stmt(&mut self, stmt: &Stmt, func: &Function, ret_label: &str) {
@@ -894,6 +530,8 @@ impl<'a> Codegen<'a> {
             Stmt::Return(expr) => {
                 if let Some(e) = expr {
                     self.gen_expr(e, func);
+                    let rty = self.expr_type(e, func);
+                    self.cast_reg(&rty, &func.ret_type);
                 }
                 self.emit(format!("jmp {}", ret_label));
             }
@@ -905,7 +543,8 @@ impl<'a> Codegen<'a> {
                 let else_label = self.new_label("Lelse");
                 let end_label = self.new_label("Lend");
                 self.gen_expr(cond, func);
-                self.emit("cmpi r0, 0");
+                let cty = self.expr_type(cond, func);
+                self.emit_cmp_zero_for_type(&cty);
                 self.emit(format!("jz {}", else_label));
                 self.gen_stmt(then_branch, func, ret_label);
                 self.emit(format!("jmp {}", end_label));
@@ -920,7 +559,8 @@ impl<'a> Codegen<'a> {
                 let end_label = self.new_label("Lend");
                 self.emit(format!("{}:", begin_label));
                 self.gen_expr(cond, func);
-                self.emit("cmpi r0, 0");
+                let cty = self.expr_type(cond, func);
+                self.emit_cmp_zero_for_type(&cty);
                 self.emit(format!("jz {}", end_label));
                 self.gen_stmt(body, func, ret_label);
                 self.emit(format!("jmp {}", begin_label));
@@ -944,8 +584,11 @@ impl<'a> Codegen<'a> {
                 for (id, init) in vars {
                     if let Some(expr) = init {
                         self.gen_expr(expr, func);
+                        let rty = self.expr_type(expr, func);
+                        let lty = &func.locals[*id].ty;
+                        self.cast_reg(&rty, lty);
                         let offset = func.locals[*id].offset;
-                        self.emit(format!("store32 [r30 + {}], r0", offset));
+                        self.emit_store_var(lty, offset);
                     }
                 }
             },
@@ -959,12 +602,31 @@ impl<'a> Codegen<'a> {
             ExprKind::Num(n) => {
                 self.emit(format!("movi r0, {}", *n as i32));
             }
+            ExprKind::Float(f) => {
+                let bits = f.to_bits();
+                self.emit(format!("movi r0, {}", bits));
+            }
+            ExprKind::Str(_) => {
+                panic!("String literals are not supported in expressions");
+            }
             ExprKind::Var(id) => {
                 let var = &func.locals[*id];
                 if var.ty.is_array() {
                     self.gen_lvalue(expr, func);
                 } else {
-                    self.emit(format!("load32 r0, [r30 + {}]", var.offset));
+                    self.emit_load_var(&var.ty, var.offset);
+                }
+            }
+            ExprKind::GlobalVar(name) => {
+                let gty = self
+                    .global_types
+                    .get(name)
+                    .unwrap_or_else(|| panic!("Undefined global: {}", name));
+                if gty.is_array() {
+                    self.emit(format!("movi r0, {}", name));
+                } else {
+                    self.emit(format!("movi r1, {}", name));
+                    self.emit_load_from_addr(gty, "r1");
                 }
             }
             ExprKind::Assign(lhs, rhs) => {
@@ -976,8 +638,14 @@ impl<'a> Codegen<'a> {
                     if lty.is_array() {
                         panic!("Cannot assign to array");
                     }
+                    let rty = self.expr_type(rhs, func);
+                    self.cast_reg(&rty, &lty);
                 }
-                self.emit("store32 [r1], r0");
+                if let Some(lty) = self.lvalue_type(lhs, func) {
+                    self.emit_store_to_addr(&lty, "r1");
+                } else {
+                    self.emit("store32 [r1], r0");
+                }
             }
             ExprKind::Binary { op, lhs, rhs } => {
                 self.gen_binary(*op, lhs, rhs, func);
@@ -987,7 +655,7 @@ impl<'a> Codegen<'a> {
             }
             ExprKind::Call { name, args } => {
 
-                if (self.try_gen_builtin_call(name, args, func)) {
+                if self.try_gen_builtin_call(name, args, func) {
                     self.emit("movi r0, 0");
                     return;
                 }
@@ -1005,10 +673,13 @@ impl<'a> Codegen<'a> {
             }
             ExprKind::Index { base, index } => {
                 self.gen_lvalue(expr, func);
-                self.emit("load32 r0, [r0]");
+                let rty = self.expr_type(expr, func);
+                self.emit_load_from_addr(&rty, "r0");
             }
-            ExprKind::Cast { expr: inner, .. } => {
+            ExprKind::Cast { ty, expr: inner } => {
+                let from = self.expr_type(inner, func);
                 self.gen_expr(inner, func);
+                self.cast_reg(&from, ty);
             }
         }
     }
@@ -1020,21 +691,32 @@ impl<'a> Codegen<'a> {
             }
             UnOp::Neg => {
                 self.gen_expr(expr, func);
-                self.emit("movi r1, 0");
-                self.emit("sub r0, r1, r0");
+                let ty = self.expr_type(expr, func);
+                if Self::is_float_type(&ty) {
+                    self.emit("fneg r0, r0");
+                } else {
+                    self.emit("movi r1, 0");
+                    self.emit("sub r0, r1, r0");
+                }
             }
             UnOp::Addr => {
                 self.gen_lvalue(expr, func);
             }
             UnOp::Deref => {
                 self.gen_expr(expr, func);
-                self.emit("load32 r0, [r0]");
+                let ty = self.expr_type(expr, func);
+                if let Type::Ptr(elem) = ty {
+                    self.emit_load_from_addr(&elem, "r0");
+                } else {
+                    panic!("Cannot dereference non-pointer");
+                }
             }
             UnOp::Not => {
                 self.gen_expr(expr, func);
                 let t = self.new_label("Lnot");
                 let end = self.new_label("Lend");
-                self.emit("cmpi r0, 0");
+                let ty = self.expr_type(expr, func);
+                self.emit_cmp_zero_for_type(&ty);
                 self.emit(format!("jz {}", t));
                 self.emit("movi r0, 0");
                 self.emit(format!("jmp {}", end));
@@ -1051,10 +733,12 @@ impl<'a> Codegen<'a> {
                 let end = self.new_label("Land_end");
                 let false_l = self.new_label("Land_false");
                 self.gen_expr(lhs, func);
-                self.emit("cmpi r0, 0");
+                let lty = self.expr_type(lhs, func);
+                self.emit_cmp_zero_for_type(&lty);
                 self.emit(format!("jz {}", false_l));
                 self.gen_expr(rhs, func);
-                self.emit("cmpi r0, 0");
+                let rty = self.expr_type(rhs, func);
+                self.emit_cmp_zero_for_type(&rty);
                 self.emit(format!("jz {}", false_l));
                 self.emit("movi r0, 1");
                 self.emit(format!("jmp {}", end));
@@ -1066,10 +750,12 @@ impl<'a> Codegen<'a> {
                 let end = self.new_label("Lor_end");
                 let true_l = self.new_label("Lor_true");
                 self.gen_expr(lhs, func);
-                self.emit("cmpi r0, 0");
+                let lty = self.expr_type(lhs, func);
+                self.emit_cmp_zero_for_type(&lty);
                 self.emit(format!("jnz {}", true_l));
                 self.gen_expr(rhs, func);
-                self.emit("cmpi r0, 0");
+                let rty = self.expr_type(rhs, func);
+                self.emit_cmp_zero_for_type(&rty);
                 self.emit(format!("jnz {}", true_l));
                 self.emit("movi r0, 0");
                 self.emit(format!("jmp {}", end));
@@ -1083,32 +769,102 @@ impl<'a> Codegen<'a> {
             | BinOp::Le
             | BinOp::Gt
             | BinOp::Ge => {
+                let lt = self.expr_type(lhs, func);
+                let rt = self.expr_type(rhs, func);
                 self.gen_expr(lhs, func);
                 self.emit("push r0");
                 self.gen_expr(rhs, func);
                 self.emit("pop r1");
-                self.emit("cmp r1, r0");
-                let t = self.new_label("Lcmp_true");
-                let end = self.new_label("Lcmp_end");
-                let jmp = match op {
-                    BinOp::Eq => "jz",
-                    BinOp::Ne => "jnz",
-                    BinOp::Lt => "jl",
-                    BinOp::Le => "jle",
-                    BinOp::Gt => "jg",
-                    BinOp::Ge => "jge",
-                    _ => unreachable!(),
-                };
-                self.emit(format!("{} {}", jmp, t));
-                self.emit("movi r0, 0");
-                self.emit(format!("jmp {}", end));
-                self.emit(format!("{}:", t));
-                self.emit("movi r0, 1");
-                self.emit(format!("{}:", end));
+                if Self::is_float_type(&lt) || Self::is_float_type(&rt) {
+                    if matches!(lt, Type::Ptr(_)) || matches!(rt, Type::Ptr(_)) {
+                        panic!("Pointer and float comparison not supported");
+                    }
+                    if !Self::is_float_type(&lt) {
+                        self.emit("itof r1, r1");
+                    }
+                    if !Self::is_float_type(&rt) {
+                        self.emit("itof r0, r0");
+                    }
+                    self.emit("fcmp r1, r0");
+                    let t = self.new_label("Lfcmp_true");
+                    let end = self.new_label("Lfcmp_end");
+                    match op {
+                        BinOp::Eq => {
+                            self.emit(format!("jz {}", t));
+                        }
+                        BinOp::Ne => {
+                            self.emit(format!("jnz {}", t));
+                        }
+                        BinOp::Gt => {
+                            self.emit(format!("jc {}", t));
+                        }
+                        BinOp::Ge => {
+                            let z = self.new_label("Lfcmp_ge");
+                            self.emit(format!("jz {}", z));
+                            self.emit(format!("jc {}", t));
+                            self.emit(format!("jmp {}", end));
+                            self.emit(format!("{}:", z));
+                            self.emit(format!("jmp {}", t));
+                        }
+                        BinOp::Lt => {
+                            let z = self.new_label("Lfcmp_lt_eq");
+                            self.emit(format!("jz {}", z));
+                            self.emit(format!("jle {}", t));
+                            self.emit(format!("jmp {}", end));
+                            self.emit(format!("{}:", z));
+                        }
+                        BinOp::Le => {
+                            self.emit(format!("jle {}", t));
+                        }
+                        _ => unreachable!(),
+                    }
+                    self.emit("movi r0, 0");
+                    self.emit(format!("jmp {}", end));
+                    self.emit(format!("{}:", t));
+                    self.emit("movi r0, 1");
+                    self.emit(format!("{}:", end));
+                } else {
+                    self.emit("cmp r1, r0");
+                    let t = self.new_label("Lcmp_true");
+                    let end = self.new_label("Lcmp_end");
+                    let jmp = match op {
+                        BinOp::Eq => "jz",
+                        BinOp::Ne => "jnz",
+                        BinOp::Lt => "jl",
+                        BinOp::Le => "jle",
+                        BinOp::Gt => "jg",
+                        BinOp::Ge => "jge",
+                        _ => unreachable!(),
+                    };
+                    self.emit(format!("{} {}", jmp, t));
+                    self.emit("movi r0, 0");
+                    self.emit(format!("jmp {}", end));
+                    self.emit(format!("{}:", t));
+                    self.emit("movi r0, 1");
+                    self.emit(format!("{}:", end));
+                }
             }
             BinOp::Add | BinOp::Sub => {
                 let lt = self.expr_type(lhs, func);
                 let rt = self.expr_type(rhs, func);
+                if Self::is_float_type(&lt) || Self::is_float_type(&rt) {
+                    if matches!(lt, Type::Ptr(_)) || matches!(rt, Type::Ptr(_)) {
+                        panic!("Pointer and float arithmetic not supported");
+                    }
+                    self.gen_expr(lhs, func);
+                    if !Self::is_float_type(&lt) {
+                        self.emit("itof r0, r0");
+                    }
+                    self.emit("push r0");
+                    self.gen_expr(rhs, func);
+                    if !Self::is_float_type(&rt) {
+                        self.emit("itof r0, r0");
+                    }
+                    self.emit("pop r1");
+                    let inst = if matches!(op, BinOp::Add) { "fadd" } else { "fsub" };
+                    self.emit(format!("{} r0, r1, r0", inst));
+                    return;
+                }
                 match (lt, rt) {
                     (Type::Ptr(elem), Type::Int) => {
                         self.gen_expr(lhs, func);
@@ -1155,12 +911,32 @@ impl<'a> Codegen<'a> {
                 }
             }
             BinOp::Mul | BinOp::Div => {
-                self.gen_expr(lhs, func);
-                self.emit("push r0");
-                self.gen_expr(rhs, func);
-                self.emit("pop r1");
-                let inst = if matches!(op, BinOp::Mul) { "mul" } else { "div" };
-                self.emit(format!("{} r0, r1, r0", inst));
+                let lt = self.expr_type(lhs, func);
+                let rt = self.expr_type(rhs, func);
+                if Self::is_float_type(&lt) || Self::is_float_type(&rt) {
+                    if matches!(lt, Type::Ptr(_)) || matches!(rt, Type::Ptr(_)) {
+                        panic!("Pointer and float arithmetic not supported");
+                    }
+                    self.gen_expr(lhs, func);
+                    if !Self::is_float_type(&lt) {
+                        self.emit("itof r0, r0");
+                    }
+                    self.emit("push r0");
+                    self.gen_expr(rhs, func);
+                    if !Self::is_float_type(&rt) {
+                        self.emit("itof r0, r0");
+                    }
+                    self.emit("pop r1");
+                    let inst = if matches!(op, BinOp::Mul) { "fmul" } else { "fdiv" };
+                    self.emit(format!("{} r0, r1, r0", inst));
+                } else {
+                    self.gen_expr(lhs, func);
+                    self.emit("push r0");
+                    self.gen_expr(rhs, func);
+                    self.emit("pop r1");
+                    let inst = if matches!(op, BinOp::Mul) { "mul" } else { "div" };
+                    self.emit(format!("{} r0, r1, r0", inst));
+                }
             }
         }
     }
@@ -1184,6 +960,9 @@ impl<'a> Codegen<'a> {
                 let var = &func.locals[*id];
                 self.emit(format!("movi r1, {}", var.offset));
                 self.emit("add r0, r30, r1");
+            }
+            ExprKind::GlobalVar(name) => {
+                self.emit(format!("movi r0, {}", name));
             }
             ExprKind::Unary { op: UnOp::Deref, expr } => {
                 self.gen_expr(expr, func);
@@ -1217,6 +996,17 @@ impl<'a> Codegen<'a> {
                     self.gen_expr(expr, func);
                 }
             }
+            ExprKind::GlobalVar(name) => {
+                let gty = self
+                    .global_types
+                    .get(name)
+                    .unwrap_or_else(|| panic!("Undefined global: {}", name));
+                if gty.is_array() {
+                    self.emit(format!("movi r0, {}", name));
+                } else {
+                    self.gen_expr(expr, func);
+                }
+            }
             _ => self.gen_expr(expr, func),
         }
     }
@@ -1224,20 +1014,36 @@ impl<'a> Codegen<'a> {
     fn expr_type(&self, expr: &Expr, func: &Function) -> Type {
         match &expr.kind {
             ExprKind::Num(_) => Type::Int,
+            ExprKind::Float(_) => Type::Float,
+            ExprKind::Str(_) => panic!("String literals are not supported in expressions"),
             ExprKind::Var(id) => func.locals[*id].ty.decay(),
+            ExprKind::GlobalVar(name) => self
+                .global_types
+                .get(name)
+                .unwrap_or_else(|| panic!("Undefined global: {}", name))
+                .decay(),
             ExprKind::Assign(lhs, _) => self.expr_type(lhs, func),
             ExprKind::Binary { op, lhs, rhs } => match op {
                 BinOp::Add | BinOp::Sub => {
                     let lt = self.expr_type(lhs, func);
                     let rt = self.expr_type(rhs, func);
                     match (lt, rt) {
+                        (Type::Float, _) | (_, Type::Float) => Type::Float,
                         (Type::Ptr(elem), Type::Int) => Type::Ptr(elem),
                         (Type::Int, Type::Ptr(elem)) if matches!(op, BinOp::Add) => Type::Ptr(elem),
                         (Type::Ptr(_), Type::Ptr(_)) => Type::Int,
                         _ => Type::Int,
                     }
                 }
-                BinOp::Mul | BinOp::Div => Type::Int,
+                BinOp::Mul | BinOp::Div => {
+                    let lt = self.expr_type(lhs, func);
+                    let rt = self.expr_type(rhs, func);
+                    if matches!(lt, Type::Float) || matches!(rt, Type::Float) {
+                        Type::Float
+                    } else {
+                        Type::Int
+                    }
+                }
                 BinOp::Eq
                 | BinOp::Ne
                 | BinOp::Lt
@@ -1256,6 +1062,14 @@ impl<'a> Codegen<'a> {
                     Type::Ptr(elem) => (*elem).clone(),
                     _ => panic!("Cannot dereference non-pointer"),
                 },
+                UnOp::Neg | UnOp::Pos => {
+                    let et = self.expr_type(expr, func);
+                    if matches!(et, Type::Float) {
+                        Type::Float
+                    } else {
+                        Type::Int
+                    }
+                }
                 _ => Type::Int,
             },
             ExprKind::Call { name, .. } => self
@@ -1277,6 +1091,10 @@ impl<'a> Codegen<'a> {
     fn lvalue_type(&self, expr: &Expr, func: &Function) -> Option<Type> {
         match &expr.kind {
             ExprKind::Var(id) => Some(func.locals[*id].ty.clone()),
+            ExprKind::GlobalVar(name) => self
+                .global_types
+                .get(name)
+                .cloned(),
             ExprKind::Unary { op: UnOp::Deref, expr } => match self.expr_type(expr, func) {
                 Type::Ptr(elem) => Some(*elem),
                 _ => None,
@@ -1291,10 +1109,9 @@ impl<'a> Codegen<'a> {
     }
 }
 
-pub fn compile(input: &String) -> String {
+pub fn compile(input: &String, _arch: &ArchConfig) -> String {
     let mut tokenizer = Tokenizer::new(input);
     let mut tokens = Vec::new();
-
     loop {
         let tok = tokenizer.next_token();
         let is_eof = matches!(tok.kind, TokenKind::Eof);
@@ -1307,7 +1124,7 @@ pub fn compile(input: &String) -> String {
     let mut parser = Parser::new(tokens);
     let prog = parser.parse_program();
 
-    let mut codegen = Codegen::new(&parser.func_types);
+    let mut codegen = Codegen::new(&parser.func_types, &parser.global_types, &prog.globals);
     codegen.gen_program(&prog);
 
     let mut asm_output = String::new();
@@ -1321,9 +1138,10 @@ pub fn compile(input: &String) -> String {
 #[cfg(test)]
 mod tests {
     use super::compile;
+    use crate::assemble::config::ArchConfig;
 
     fn compile_ok(src: &str) -> String {
-        compile(&src.to_string())
+        compile(&src.to_string(), &ArchConfig::default())
     }
 
     #[test]
@@ -1371,9 +1189,22 @@ mod tests {
     }
 
     #[test]
-    #[should_panic]
-    fn reject_char_type() {
-        compile_ok("int main(){char c; return 0;}");
+    fn compile_other_scalar_types() {
+        let _asm = compile_ok("int main(){char c; long l; float f; c=1; l=2; f=3; return l;}");
+    }
+
+    #[test]
+    fn compile_char_byte_semantics() {
+        let asm = compile_ok("int main(){char c; c=65; return c;}");
+        assert!(asm.contains("store ["));
+        assert!(asm.contains("load r0, [r30"));
+    }
+
+    #[test]
+    fn compile_float_ops() {
+        let asm = compile_ok("float add(float a,float b){return a+b;} int main(){float x=1.5; float y=2.0; float z=add(x,y); return z>0.0;}");
+        assert!(asm.contains("fadd"));
+        assert!(asm.contains("fcmp"));
     }
 
     #[test]

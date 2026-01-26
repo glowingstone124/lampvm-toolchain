@@ -6,7 +6,29 @@ use std::path::Path;
 use crate::assemble::config::ArchConfig;
 use crate::assemble::inst::inst;
 use crate::assemble::opcode::Opcode;
-use crate::assemble::parse::parse_operands;
+use crate::assemble::parse::{parse_imm, parse_operands};
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Section {
+    Text,
+    Data,
+    Bss,
+}
+
+#[derive(Clone, Copy, Debug)]
+struct LabelRef {
+    section: Section,
+    offset: u32,
+}
+
+pub struct AssembledProgram {
+    pub text: Vec<u64>,
+    pub data: Vec<u8>,
+    pub bss_size: u32,
+    pub text_base: u32,
+    pub data_base: u32,
+    pub bss_base: u32,
+}
 
 fn clean_line(line: &str) -> &str {
     line.split(';').next().unwrap_or("").trim()
@@ -45,83 +67,249 @@ pub fn assemble_line(
     Some(inst(opcode as u8, rd, rs1, rs2, imm))
 }
 
-pub fn assemble_file<P: AsRef<Path>>(path: P, arch: &ArchConfig) -> Vec<u64> {
+fn parse_directive(line: &str) -> (&str, &str) {
+    let mut iter = line.splitn(2, char::is_whitespace);
+    let name = iter.next().unwrap();
+    let rest = iter.next().unwrap_or("").trim();
+    (name, rest)
+}
+
+fn parse_string_literal(s: &str) -> Vec<u8> {
+    let s = s.trim();
+    if !s.starts_with('"') {
+        panic!("Expected string literal");
+    }
+    let mut chars = s[1..].chars();
+    let mut out = Vec::new();
+    while let Some(ch) = chars.next() {
+        if ch == '"' {
+            if chars.as_str().trim().is_empty() {
+                return out;
+            }
+            panic!("Unexpected trailing characters after string literal");
+        }
+        if ch != '\\' {
+            out.push(ch as u8);
+            continue;
+        }
+        let esc = chars.next().unwrap_or_else(|| panic!("Unterminated escape sequence"));
+        let byte = match esc {
+            'n' => b'\n',
+            'r' => b'\r',
+            't' => b'\t',
+            '0' => b'\0',
+            '\\' => b'\\',
+            '"' => b'"',
+            _ => panic!("Unsupported escape sequence: \\{}", esc),
+        };
+        out.push(byte);
+    }
+    panic!("Unterminated string literal");
+}
+
+fn parse_list_args(args: &str) -> Vec<String> {
+    args.split(',')
+        .map(|s| s.trim())
+        .filter(|s| !s.is_empty())
+        .map(|s| s.to_string())
+        .collect()
+}
+
+fn data_directive_size(
+    directive: &str,
+    args: &str,
+    arch: &ArchConfig,
+    labels: &HashMap<String, u32>,
+) -> u32 {
+    match directive {
+        ".byte" => parse_list_args(args).len() as u32,
+        ".word" => (parse_list_args(args).len() as u32) * 2,
+        ".long" => (parse_list_args(args).len() as u32) * 4,
+        ".space" | ".zero" => parse_imm(args, arch, labels),
+        ".ascii" => parse_string_literal(args).len() as u32,
+        ".asciz" => (parse_string_literal(args).len() as u32) + 1,
+        _ => 0,
+    }
+}
+
+fn emit_data_directive(
+    data: &mut Vec<u8>,
+    directive: &str,
+    args: &str,
+    arch: &ArchConfig,
+    labels: &HashMap<String, u32>,
+) {
+    match directive {
+        ".byte" => {
+            for arg in parse_list_args(args) {
+                let val = parse_imm(&arg, arch, labels) as u8;
+                data.push(val);
+            }
+        }
+        ".word" => {
+            for arg in parse_list_args(args) {
+                let val = parse_imm(&arg, arch, labels) as u16;
+                data.extend_from_slice(&val.to_le_bytes());
+            }
+        }
+        ".long" => {
+            for arg in parse_list_args(args) {
+                let val = parse_imm(&arg, arch, labels);
+                data.extend_from_slice(&val.to_le_bytes());
+            }
+        }
+        ".space" | ".zero" => {
+            let count = parse_imm(args, arch, labels) as usize;
+            data.extend(std::iter::repeat(0u8).take(count));
+        }
+        ".ascii" => {
+            data.extend_from_slice(&parse_string_literal(args));
+        }
+        ".asciz" => {
+            let mut bytes = parse_string_literal(args);
+            bytes.push(0);
+            data.extend_from_slice(&bytes);
+        }
+        _ => {}
+    }
+}
+
+pub fn assemble_file_with_sections<P: AsRef<Path>>(path: P, arch: &ArchConfig) -> AssembledProgram {
     let file = File::open(path).expect("Could not open file");
     let reader = io::BufReader::new(file);
-
     let lines: Vec<String> = reader.lines().filter_map(Result::ok).collect();
+    assemble_lines_with_sections(&lines, arch)
+}
 
-    let mut labels = HashMap::new();
-    let mut program: Vec<u64> = Vec::new();
+pub fn assemble_string_with_sections(input: &str, arch: &ArchConfig) -> AssembledProgram {
+    let lines: Vec<String> = input.lines().map(|s| s.to_string()).collect();
+    assemble_lines_with_sections(&lines, arch)
+}
+
+fn assemble_lines_with_sections(lines: &[String], arch: &ArchConfig) -> AssembledProgram {
+    let mut label_refs: HashMap<String, LabelRef> = HashMap::new();
+    let mut section = Section::Text;
+    let mut text_size: u32 = 0;
+    let mut data_size: u32 = 0;
+    let mut bss_size: u32 = 0;
 
     const INST_SIZE: u32 = 8;
 
-    let mut pc = arch.macros.get("PROGRAM_BASE").expect("No PROGRAM_BASE found").clone();
-    for line in &lines {
+    let text_base = *arch.macros.get("PROGRAM_BASE").expect("No PROGRAM_BASE found");
+    let dummy_labels: HashMap<String, u32> = HashMap::new();
+
+    for line in lines {
         let clean = clean_line(line);
         if clean.is_empty() { continue; }
 
         let (label_opt, inst_part) = split_label(clean);
-
         if let Some(label) = label_opt {
-            if labels.insert(label.to_string(), pc).is_some() {
+            if label_refs.insert(label.to_string(), LabelRef { section, offset: match section {
+                Section::Text => text_size,
+                Section::Data => data_size,
+                Section::Bss => bss_size,
+            }}).is_some() {
                 panic!("Duplicate label definition: {}", label);
             }
         }
-        if !inst_part.is_empty() {
-            pc += INST_SIZE;
-        }
-    }
-
-    for line in &lines {
-        let clean = clean_line(line);
-        if clean.is_empty() { continue; }
-
-        let (_, inst_part) = split_label(clean);
 
         if inst_part.is_empty() { continue; }
 
+        if inst_part.starts_with('.') {
+            let (directive, args) = parse_directive(inst_part);
+            match directive {
+                ".text" => section = Section::Text,
+                ".data" => section = Section::Data,
+                ".bss" => section = Section::Bss,
+                ".byte" | ".word" | ".long" | ".space" | ".zero" | ".ascii" | ".asciz" => {
+                    let size = data_directive_size(directive, args, arch, &dummy_labels);
+                    match section {
+                        Section::Text => panic!("Data directive {} not allowed in .text", directive),
+                        Section::Data => data_size += size,
+                        Section::Bss => {
+                            if matches!(directive, ".ascii" | ".asciz" | ".byte" | ".word" | ".long") {
+                                panic!("Initialized data not allowed in .bss");
+                            }
+                            bss_size += size;
+                        }
+                    }
+                }
+                _ => panic!("Unknown directive {}", directive),
+            }
+            continue;
+        }
+
+        if section != Section::Text {
+            panic!("Instructions are only allowed in .text");
+        }
+        text_size += INST_SIZE;
+    }
+
+    let data_base = text_base + text_size;
+    let bss_base = data_base + data_size;
+
+    let mut labels: HashMap<String, u32> = HashMap::new();
+    for (name, label_ref) in label_refs {
+        let base = match label_ref.section {
+            Section::Text => text_base,
+            Section::Data => data_base,
+            Section::Bss => bss_base,
+        };
+        labels.insert(name, base + label_ref.offset);
+    }
+
+    let mut program: Vec<u64> = Vec::new();
+    let mut data: Vec<u8> = Vec::new();
+    section = Section::Text;
+
+    for line in lines {
+        let clean = clean_line(line);
+        if clean.is_empty() { continue; }
+        let (_, inst_part) = split_label(clean);
+        if inst_part.is_empty() { continue; }
+
+        if inst_part.starts_with('.') {
+            let (directive, args) = parse_directive(inst_part);
+            match directive {
+                ".text" => section = Section::Text,
+                ".data" => section = Section::Data,
+                ".bss" => section = Section::Bss,
+                ".byte" | ".word" | ".long" | ".space" | ".zero" | ".ascii" | ".asciz" => {
+                    if section == Section::Data {
+                        emit_data_directive(&mut data, directive, args, arch, &labels);
+                    } else if section == Section::Bss {
+                        // bss is represented only by size, data not emitted
+                    } else {
+                        panic!("Data directive {} not allowed in .text", directive);
+                    }
+                }
+                _ => panic!("Unknown directive {}", directive),
+            }
+            continue;
+        }
+
+        if section != Section::Text {
+            panic!("Instructions are only allowed in .text");
+        }
         if let Some(inst64) = assemble_line(inst_part, arch, &labels) {
             program.push(inst64);
         }
     }
 
-    program
+    AssembledProgram {
+        text: program,
+        data,
+        bss_size,
+        text_base,
+        data_base,
+        bss_base,
+    }
+}
+
+pub fn assemble_file<P: AsRef<Path>>(path: P, arch: &ArchConfig) -> Vec<u64> {
+    assemble_file_with_sections(path, arch).text
 }
 
 pub fn assemble_string(input: &str, arch: &ArchConfig) -> Vec<u64> {
-    let lines: Vec<String> = input.lines().map(|s| s.to_string()).collect();
-
-    let mut labels: HashMap<String, u32> = HashMap::new();
-    let mut program: Vec<u64> = Vec::new();
-
-    const INST_SIZE: u32 = 8;
-
-    let mut pc = arch.macros.get("PROGRAM_BASE").expect("No PROGRAM_BASE found").clone();
-
-    for line in &lines {
-        let clean = clean_line(line);
-        if clean.is_empty() { continue; }
-        let (label_opt, inst_part) = split_label(clean);
-
-        if let Some(label) = label_opt {
-            if labels.insert(label.to_string(), pc).is_some() {
-                panic!("Duplicate label definition: {}", label);
-            }
-        }
-        if !inst_part.is_empty() {
-            pc += INST_SIZE;
-        }
-    }
-
-    for line in &lines {
-        let clean = clean_line(line);
-        if clean.is_empty() { continue; }
-        let (_, inst_part) = split_label(clean);
-        if inst_part.is_empty() { continue; }
-        if let Some(inst64) = assemble_line(inst_part, arch, &labels) {
-            program.push(inst64);
-        }
-    }
-    program
+    assemble_string_with_sections(input, arch).text
 }
