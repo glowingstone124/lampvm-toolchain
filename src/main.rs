@@ -4,6 +4,7 @@ mod assemble {
     pub mod config;
     pub mod opcode;
     pub mod parse;
+    pub mod object;
 }
 
 mod compiler {
@@ -11,6 +12,8 @@ mod compiler {
     pub mod tokenizer;
     pub mod parser;
 }
+
+mod linker;
 
 use clap::{Parser, Subcommand};
 use std::fs;
@@ -20,7 +23,8 @@ use std::path::Path;
 
 use crate::assemble::config::ArchConfig;
 use crate::assemble::assemble::AssembledProgram;
-use crate::compiler::compiler::compile;
+use crate::compiler::compiler::{compile, EmitMode};
+use crate::linker::link_objects;
 
 #[derive(Parser, Debug)]
 #[command(author = "Glowingstone", version = "0.01", about = "lampVM's toolchain", long_about = None)]
@@ -37,9 +41,25 @@ enum Commands {
 
         #[arg(long, default_value = "program.bin")]
         output: String,
+
+        #[arg(long)]
+        emit_obj: bool,
     },
     Cc {
         input: String,
+
+        #[arg(short = 'c', long)]
+        emit_obj: bool,
+
+        #[arg(long)]
+        output: Option<String>,
+    },
+    Link {
+        #[arg(required = true)]
+        inputs: Vec<String>,
+
+        #[arg(long, default_value = "a.bin")]
+        output: String,
     },
 }
 
@@ -47,46 +67,81 @@ fn main() {
     let cli = Cli::parse();
 
     match cli.command {
-        Commands::Asm { input, output } => {
+        Commands::Asm { input, output, emit_obj } => {
             println!("Assembly mode");
             println!("Input file: {}", input);
-            println!("Output file: {}", output);
+            let obj_output = if emit_obj && output.ends_with(".bin") {
+                replace_suffix_or_append(&output, ".bin", ".o")
+            } else {
+                output.clone()
+            };
+            println!("Output file: {}", obj_output);
 
             let arch = load_or_generate_arch_config("config.yml");
             println!("Using architecture: {:?}", arch);
 
-            println!("Assembling {}...", input);
-            let program = assemble::assemble::assemble_file_with_sections(&input, &arch);
-            println!("Assembly finished. {} instructions generated.", program.text.len());
+            if emit_obj {
+                println!("Assembling relocatable object {}...", input);
+                let obj = assemble::assemble::assemble_file_to_object(&input, &arch);
+                let yaml_string = serde_yaml::to_string(&obj).expect("Failed to serialize object");
+                fs::write(&obj_output, yaml_string).expect("Failed to write object file");
+                println!("Object written to {}", obj_output);
+            } else {
+                println!("Assembling {}...", input);
+                let program = assemble::assemble::assemble_file_with_sections(&input, &arch);
+                println!("Assembly finished. {} instructions generated.", program.text.len());
 
-            for (i, inst) in program.text.iter().enumerate() {
-                println!("{}: 0x{:016X}", i, inst);
+                for (i, inst) in program.text.iter().enumerate() {
+                    println!("{}: 0x{:016X}", i, inst);
+                }
+
+                write_program_bin(&program.text, &output);
+                write_data_and_layout(&program, &output);
             }
-
-            write_program_bin(&program.text, &output);
-            write_data_and_layout(&program, &output);
         }
 
-        Commands::Cc { input } => {
+        Commands::Cc { input, emit_obj, output } => {
             println!("C compile mode: {}", input);
 
             let arch = load_or_generate_arch_config("config.yml");
             println!("Using architecture: {:?}", arch);
 
             let content = fs::read_to_string(&input).expect("Failed to read file");
-            let asm_text = compile(&content, &arch);
+            let mode = if emit_obj { EmitMode::Object } else { EmitMode::Executable };
+            let asm_text = compile(&content, &arch, mode);
             println!("Compile finished. asm text length = {} chars", asm_text.len());
             println!("Result:\n{}", asm_text);
 
-            println!("Assembling code...");
-            let program = assemble::assemble::assemble_string_with_sections(&asm_text, &arch);
-            println!("Assembly finished. {} instructions generated.", program.text.len());
+            if emit_obj {
+                println!("Assembling relocatable object...");
+                let obj = assemble::assemble::assemble_string_to_object(&asm_text, &arch);
+                let output_name = output.unwrap_or_else(|| replace_suffix_or_append(&input, ".c", ".o"));
+                let yaml_string = serde_yaml::to_string(&obj).expect("Failed to serialize object");
+                fs::write(&output_name, yaml_string).expect("Failed to write object file");
+                println!("Output: {}", output_name);
+            } else {
+                println!("Assembling code...");
+                let program = assemble::assemble::assemble_string_with_sections(&asm_text, &arch);
+                println!("Assembly finished. {} instructions generated.", program.text.len());
 
-            let output_name = replace_suffix_or_append(&input, ".c", ".bin");
-            write_program_bin(&program.text, &output_name);
-            write_data_and_layout(&program, &output_name);
+                let output_name = output.unwrap_or_else(|| replace_suffix_or_append(&input, ".c", ".bin"));
+                write_program_bin(&program.text, &output_name);
+                write_data_and_layout(&program, &output_name);
+                println!("Output: {}", output_name);
+            }
+        }
 
-            println!("Output: {}", output_name);
+        Commands::Link { inputs, output } => {
+            println!("Link mode");
+            let arch = load_or_generate_arch_config("config.yml");
+            println!("Using architecture: {:?}", arch);
+
+            let program = link_objects(&inputs, &arch);
+            println!("Link finished. {} instructions generated.", program.text.len());
+
+            write_program_bin(&program.text, &output);
+            write_data_and_layout(&program, &output);
+            println!("Output: {}", output);
         }
     }
 }

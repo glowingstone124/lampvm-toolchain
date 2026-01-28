@@ -396,12 +396,15 @@ impl<'a> Codegen<'a> {
             }
         }
     }
-    fn gen_program(&mut self, prog: &Program) {
+    fn gen_program(&mut self, prog: &Program, mode: EmitMode) {
         self.emit(".text");
-        self.emit("movi r30, MEM_SIZE");
-        self.emit("call main");
-        self.emit("halt");
+        if matches!(mode, EmitMode::Executable) {
+            self.emit("movi r30, MEM_SIZE");
+            self.emit("call main");
+            self.emit("halt");
+        }
         for func in &prog.funcs {
+            self.emit(format!(".globl {}", func.name));
             self.gen_function(func);
         }
         self.gen_globals();
@@ -426,6 +429,7 @@ impl<'a> Codegen<'a> {
                     data_lines.push(format!(".zero {}", aligned - data_offset));
                     data_offset = aligned;
                 }
+                data_lines.push(format!(".globl {}", g.name));
                 data_lines.push(format!("{}:", g.name));
                 match (&g.ty, init) {
                     (Type::Char, ConstValue::Int(v)) => {
@@ -450,6 +454,7 @@ impl<'a> Codegen<'a> {
                     bss_lines.push(format!(".zero {}", aligned - bss_offset));
                     bss_offset = aligned;
                 }
+                bss_lines.push(format!(".globl {}", g.name));
                 bss_lines.push(format!("{}:", g.name));
                 bss_lines.push(format!(".zero {}", size));
                 bss_offset += size;
@@ -1109,7 +1114,13 @@ impl<'a> Codegen<'a> {
     }
 }
 
-pub fn compile(input: &String, _arch: &ArchConfig) -> String {
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EmitMode {
+    Executable,
+    Object,
+}
+
+pub fn compile(input: &String, _arch: &ArchConfig, mode: EmitMode) -> String {
     let mut tokenizer = Tokenizer::new(input);
     let mut tokens = Vec::new();
     loop {
@@ -1125,7 +1136,7 @@ pub fn compile(input: &String, _arch: &ArchConfig) -> String {
     let prog = parser.parse_program();
 
     let mut codegen = Codegen::new(&parser.func_types, &parser.global_types, &prog.globals);
-    codegen.gen_program(&prog);
+    codegen.gen_program(&prog, mode);
 
     let mut asm_output = String::new();
     for line in &codegen.out {
@@ -1137,11 +1148,11 @@ pub fn compile(input: &String, _arch: &ArchConfig) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::compile;
+    use super::{compile, EmitMode};
     use crate::assemble::config::ArchConfig;
 
     fn compile_ok(src: &str) -> String {
-        compile(&src.to_string(), &ArchConfig::default())
+        compile(&src.to_string(), &ArchConfig::default(), EmitMode::Executable)
     }
 
     #[test]
