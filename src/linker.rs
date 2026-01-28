@@ -221,20 +221,20 @@ mod tests {
 
         let asm1 = r#"
 .text
-.globl main
+.global main
 main:
     movi r1, foo
     call bar
     ret
 .data
-.globl foo
+.global foo
 foo:
     .long 123
 "#;
 
         let asm2 = r#"
 .text
-.globl bar
+.global bar
 bar:
     ret
 "#;

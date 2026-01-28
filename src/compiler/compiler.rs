@@ -404,7 +404,7 @@ impl<'a> Codegen<'a> {
             self.emit("halt");
         }
         for func in &prog.funcs {
-            self.emit(format!(".globl {}", func.name));
+            self.emit(format!(".global {}", func.name));
             self.gen_function(func);
         }
         self.gen_globals();
@@ -429,7 +429,7 @@ impl<'a> Codegen<'a> {
                     data_lines.push(format!(".zero {}", aligned - data_offset));
                     data_offset = aligned;
                 }
-                data_lines.push(format!(".globl {}", g.name));
+                data_lines.push(format!(".global {}", g.name));
                 data_lines.push(format!("{}:", g.name));
                 match (&g.ty, init) {
                     (Type::Char, ConstValue::Int(v)) => {
@@ -454,7 +454,7 @@ impl<'a> Codegen<'a> {
                     bss_lines.push(format!(".zero {}", aligned - bss_offset));
                     bss_offset = aligned;
                 }
-                bss_lines.push(format!(".globl {}", g.name));
+                bss_lines.push(format!(".global {}", g.name));
                 bss_lines.push(format!("{}:", g.name));
                 bss_lines.push(format!(".zero {}", size));
                 bss_offset += size;

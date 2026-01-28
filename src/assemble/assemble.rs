@@ -327,7 +327,7 @@ fn assemble_lines_to_object(lines: &[String], arch: &ArchConfig) -> ObjectFile {
                 ".text" => section = Section::Text,
                 ".data" => section = Section::Data,
                 ".bss" => section = Section::Bss,
-                ".globl" => {
+                ".global" => {
                     for name in parse_symbol_list(args) {
                         globals.insert(name, true);
                     }
@@ -414,7 +414,7 @@ fn assemble_lines_to_object(lines: &[String], arch: &ArchConfig) -> ObjectFile {
                 ".text" => section = Section::Text,
                 ".data" => section = Section::Data,
                 ".bss" => section = Section::Bss,
-                ".globl" | ".extern" => {}
+                ".global" | ".extern" => {}
                 ".byte" | ".word" | ".long" | ".space" | ".zero" | ".ascii" | ".asciz" => {
                     if section == Section::Data {
                         let written = emit_data_directive_reloc(
@@ -510,7 +510,7 @@ fn assemble_lines_with_sections(lines: &[String], arch: &ArchConfig) -> Assemble
                 ".text" => section = Section::Text,
                 ".data" => section = Section::Data,
                 ".bss" => section = Section::Bss,
-                ".globl" | ".extern" => {}
+                ".global" | ".extern" => {}
                 ".byte" | ".word" | ".long" | ".space" | ".zero" | ".ascii" | ".asciz" => {
                     let size = data_directive_size(directive, args, arch, &dummy_labels);
                     match section {
@@ -564,7 +564,7 @@ fn assemble_lines_with_sections(lines: &[String], arch: &ArchConfig) -> Assemble
                 ".text" => section = Section::Text,
                 ".data" => section = Section::Data,
                 ".bss" => section = Section::Bss,
-                ".globl" | ".extern" => {}
+                ".global" | ".extern" => {}
                 ".byte" | ".word" | ".long" | ".space" | ".zero" | ".ascii" | ".asciz" => {
                     if section == Section::Data {
                         emit_data_directive(&mut data, directive, args, arch, &labels);
