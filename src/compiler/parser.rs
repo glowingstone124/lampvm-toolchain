@@ -1,5 +1,8 @@
 use std::collections::HashMap;
-use crate::compiler::compiler::{assign_offsets, BinOp, ConstValue, Expr, ExprKind, FuncBuilder, Function, Global, Program, Stmt, Type, UnOp};
+use crate::compiler::compiler::{
+    assign_offsets, BinOp, ConstValue, Expr, ExprKind, ForInit, FuncBuilder, Function, Global,
+    Program, Stmt, StructDef, StructField, SwitchItem, Type, UnOp,
+};
 use crate::compiler::tokenizer::{Token, TokenKind};
 
 const TYPE_KEYWORDS: [(&str, Type); 5] = [
@@ -29,6 +32,9 @@ pub(crate) struct Parser {
     func_builder: Option<FuncBuilder>,
     pub(crate) func_types: HashMap<String, Type>,
     pub(crate) global_types: HashMap<String, Type>,
+    typedefs: HashMap<String, Type>,
+    struct_defs: HashMap<String, StructDef>,
+    anon_struct_id: usize,
 }
 impl Parser {
     pub(crate) fn new(tokens: Vec<Token>) -> Self {
@@ -38,6 +44,9 @@ impl Parser {
             func_builder: None,
             func_types: HashMap::new(),
             global_types: HashMap::new(),
+            typedefs: HashMap::new(),
+            struct_defs: HashMap::new(),
+            anon_struct_id: 0,
         }
     }
 
@@ -108,12 +117,22 @@ impl Parser {
     fn parse_type_spec(&mut self) -> Type {
         match &self.peek().kind {
             TokenKind::Keyword(k) => {
+                if k == "struct" {
+                    self.next();
+                    return self.parse_struct_spec();
+                }
                 if let Some(ty) = type_from_keyword(k) {
                     self.next();
-                    ty
-                } else {
-                    panic!("Expected type specifier");
+                    return ty;
                 }
+                panic!("Expected type specifier");
+            }
+            TokenKind::Ident(name) => {
+                if let Some(ty) = self.typedefs.get(name).cloned() {
+                    self.next();
+                    return ty;
+                }
+                panic!("Unknown type name: {}", name);
             }
             _ => panic!("Expected type specifier"),
         }
@@ -126,11 +145,16 @@ impl Parser {
         }
         let name = self.expect_ident();
         while self.consume_punct("[") {
-            let n = match self.next().kind {
-                TokenKind::Num(v) => v as usize,
-                _ => panic!("Expected array size"),
+            let n = if self.consume_punct("]") {
+                0usize
+            } else {
+                let n = match self.next().kind {
+                    TokenKind::Num(v) => v as usize,
+                    _ => panic!("Expected array size"),
+                };
+                self.expect_punct("]");
+                n
             };
-            self.expect_punct("]");
             ty = Type::Array(Box::new(ty), n);
         }
         (ty, name)
@@ -140,6 +164,10 @@ impl Parser {
         let mut funcs = Vec::new();
         let mut globals = Vec::new();
         while !self.at_eof() {
+            if self.consume_keyword("typedef") {
+                self.parse_typedef_decl();
+                continue;
+            }
             let base_type = self.parse_type_spec();
             let (decl_type, name) = self.parse_declarator(base_type.clone());
             if self.peek_punct("(") {
@@ -169,8 +197,11 @@ impl Parser {
                     if matches!(ty, Type::Void) {
                         panic!("Global variable cannot be void: {}", name);
                     }
+                    let ty = self.fix_unsized_array_global(ty, init.as_ref());
                     if ty.is_array() && init.is_some() {
-                        panic!("Array global initializers are not supported: {}", name);
+                        if !matches!(init, Some(ConstValue::Str(_))) {
+                            panic!("Array global initializers are only supported for string literals: {}", name);
+                        }
                     }
                     if self.global_types.insert(name.clone(), ty.clone()).is_some() {
                         panic!("Duplicate global definition: {}", name);
@@ -179,7 +210,11 @@ impl Parser {
                 }
             }
         }
-        Program { funcs, globals }
+        Program {
+            funcs,
+            globals,
+            struct_defs: self.struct_defs.clone(),
+        }
     }
 
     fn parse_function(&mut self) -> Function {
@@ -223,7 +258,7 @@ impl Parser {
         let builder = self.func_builder.take().unwrap();
         let mut locals = builder.locals;
 
-        assign_offsets(&mut locals, &builder.params);
+        assign_offsets(&mut locals, &builder.params, &self.struct_defs);
 
         Function {
             name,
@@ -256,6 +291,10 @@ impl Parser {
     }
 
     fn parse_stmt(&mut self) -> Stmt {
+        if self.consume_keyword("typedef") {
+            self.parse_typedef_decl();
+            return Stmt::ExprStmt(None);
+        }
         if self.consume_keyword("asm") {
             self.expect_punct("(");
             let s = match self.next().kind {
@@ -297,6 +336,20 @@ impl Parser {
             let body = Box::new(self.parse_stmt());
             return Stmt::While { cond, body };
         }
+        if self.consume_keyword("for") {
+            return self.parse_for_stmt();
+        }
+        if self.consume_keyword("switch") {
+            return self.parse_switch_stmt();
+        }
+        if self.consume_keyword("break") {
+            self.expect_punct(";");
+            return Stmt::Break;
+        }
+        if self.consume_keyword("continue") {
+            self.expect_punct(";");
+            return Stmt::Continue;
+        }
         if self.peek_punct("{") {
             return self.parse_block_stmt();
         }
@@ -312,10 +365,11 @@ impl Parser {
     }
 
     fn peek_is_type(&self) -> bool {
-        matches!(
-            self.peek().kind,
-            TokenKind::Keyword(ref k) if is_decl_type_keyword(k)
-        )
+        match &self.peek().kind {
+            TokenKind::Keyword(k) => is_decl_type_keyword(k) || k == "struct",
+            TokenKind::Ident(name) => self.typedefs.contains_key(name),
+            _ => false,
+        }
     }
 
     fn parse_decl_stmt(&mut self) -> Stmt {
@@ -323,16 +377,19 @@ impl Parser {
         let mut decls = Vec::new();
         loop {
             let (ty, name) = self.parse_declarator(base.clone());
+            let mut ty = ty;
             let id = self
                 .func_builder
                 .as_mut()
                 .unwrap()
-                .add_var(name, ty);
+                .add_var(name, ty.clone());
             let init = if self.consume_punct("=") {
                 Some(self.parse_expr())
             } else {
                 None
             };
+            ty = self.fix_unsized_array_local(ty, init.as_ref());
+            self.func_builder.as_mut().unwrap().locals[id].ty = ty.clone();
             decls.push((id, init));
             if self.consume_punct(";") {
                 break;
@@ -518,6 +575,15 @@ impl Parser {
     }
 
     fn parse_unary(&mut self) -> Expr {
+        if self.consume_punct("++") {
+            let expr = self.parse_unary();
+            return Expr {
+                kind: ExprKind::Inc {
+                    expr: Box::new(expr),
+                    is_post: false,
+                },
+            };
+        }
         if self.consume_punct("+") {
             let expr = self.parse_unary();
             return Expr {
@@ -600,6 +666,37 @@ impl Parser {
                 };
                 continue;
             }
+            if self.consume_punct(".") {
+                let field = self.expect_ident();
+                node = Expr {
+                    kind: ExprKind::Member {
+                        base: Box::new(node),
+                        field,
+                        is_arrow: false,
+                    },
+                };
+                continue;
+            }
+            if self.consume_punct("->") {
+                let field = self.expect_ident();
+                node = Expr {
+                    kind: ExprKind::Member {
+                        base: Box::new(node),
+                        field,
+                        is_arrow: true,
+                    },
+                };
+                continue;
+            }
+            if self.consume_punct("++") {
+                node = Expr {
+                    kind: ExprKind::Inc {
+                        expr: Box::new(node),
+                        is_post: true,
+                    },
+                };
+                continue;
+            }
             break;
         }
         node
@@ -623,6 +720,13 @@ impl Parser {
             self.next();
             return Expr {
                 kind: ExprKind::Float(n),
+            };
+        }
+        if let TokenKind::Str(s) = &self.peek().kind {
+            let s = s.clone();
+            self.next();
+            return Expr {
+                kind: ExprKind::Str(s),
             };
         }
         match &self.peek().kind {
@@ -662,12 +766,216 @@ impl Parser {
         let expr = self.parse_expr();
         eval_const_expr(&expr).unwrap_or_else(|| panic!("Global initializer must be constant"))
     }
+
+    fn parse_for_stmt(&mut self) -> Stmt {
+        self.expect_punct("(");
+        let init = if self.consume_punct(";") {
+            None
+        } else if self.peek_is_type() {
+            let decls = self.parse_decl_in_for();
+            Some(ForInit::Decl(decls))
+        } else {
+            let expr = self.parse_expr();
+            self.expect_punct(";");
+            Some(ForInit::Expr(expr))
+        };
+        let cond = if self.consume_punct(";") {
+            None
+        } else {
+            let expr = self.parse_expr();
+            self.expect_punct(";");
+            Some(expr)
+        };
+        let step = if self.consume_punct(")") {
+            None
+        } else {
+            let expr = self.parse_expr();
+            self.expect_punct(")");
+            Some(expr)
+        };
+        let body = Box::new(self.parse_stmt());
+        Stmt::For {
+            init,
+            cond,
+            step,
+            body,
+        }
+    }
+
+    fn parse_decl_in_for(&mut self) -> Vec<(usize, Option<Expr>)> {
+        let base = self.parse_type_spec();
+        let mut decls = Vec::new();
+        loop {
+            let (ty, name) = self.parse_declarator(base.clone());
+            let mut ty = ty;
+            let id = self
+                .func_builder
+                .as_mut()
+                .unwrap()
+                .add_var(name, ty.clone());
+            let init = if self.consume_punct("=") {
+                Some(self.parse_expr())
+            } else {
+                None
+            };
+            ty = self.fix_unsized_array_local(ty, init.as_ref());
+            self.func_builder.as_mut().unwrap().locals[id].ty = ty.clone();
+            decls.push((id, init));
+            if self.consume_punct(";") {
+                break;
+            }
+            self.expect_punct(",");
+        }
+        decls
+    }
+
+    fn parse_switch_stmt(&mut self) -> Stmt {
+        self.expect_punct("(");
+        let expr = self.parse_expr();
+        self.expect_punct(")");
+        self.expect_punct("{");
+        let mut items = Vec::new();
+        while !self.consume_punct("}") {
+            if self.consume_keyword("case") {
+                let expr = self.parse_expr();
+                let value = eval_const_expr_int(&expr)
+                    .unwrap_or_else(|| panic!("case label must be constant int"));
+                self.expect_punct(":");
+                items.push(SwitchItem::Case(value));
+                continue;
+            }
+            if self.consume_keyword("default") {
+                self.expect_punct(":");
+                items.push(SwitchItem::Default);
+                continue;
+            }
+            let stmt = self.parse_stmt();
+            items.push(SwitchItem::Stmt(stmt));
+        }
+        Stmt::Switch { expr, items }
+    }
+
+    fn parse_struct_spec(&mut self) -> Type {
+        let mut name_opt = None;
+        if let TokenKind::Ident(name) = &self.peek().kind {
+            name_opt = Some(name.clone());
+            self.next();
+        }
+
+        if !self.peek_punct("{") {
+            let name = name_opt.unwrap_or_else(|| panic!("struct name required"));
+            return Type::Struct(name);
+        }
+
+        self.expect_punct("{");
+        let mut fields = Vec::new();
+        let mut offset = 0usize;
+        let mut struct_align = 1usize;
+        while !self.consume_punct("}") {
+            let base = self.parse_type_spec();
+            loop {
+                let (ty, name) = self.parse_declarator(base.clone());
+                let align = ty.align_with(&self.struct_defs);
+                offset = align_up_usize(offset, align);
+                fields.push(StructField {
+                    name,
+                    ty: ty.clone(),
+                    offset,
+                });
+                offset += ty.size_with(&self.struct_defs);
+                struct_align = struct_align.max(align);
+                if self.consume_punct(";") {
+                    break;
+                }
+                self.expect_punct(",");
+            }
+        }
+        let size = align_up_usize(offset, struct_align);
+        let name = name_opt.unwrap_or_else(|| {
+            let n = format!("_anon_struct_{}", self.anon_struct_id);
+            self.anon_struct_id += 1;
+            n
+        });
+        if self.struct_defs.contains_key(&name) {
+            panic!("Duplicate struct definition: {}", name);
+        }
+        self.struct_defs.insert(
+            name.clone(),
+            StructDef {
+                name: name.clone(),
+                fields,
+                size,
+                align: struct_align,
+            },
+        );
+        Type::Struct(name)
+    }
+
+    fn parse_typedef_decl(&mut self) {
+        let mut base = self.parse_type_spec();
+        let mut first_typedef_name: Option<String> = None;
+        loop {
+            let (ty, name) = self.parse_declarator(base.clone());
+            let mut ty = ty;
+            if let Type::Struct(struct_name) = &ty {
+                if struct_name.starts_with("_anon_struct_") {
+                    if first_typedef_name.is_none() {
+                        let new_name = name.clone();
+                        if let Some(def) = self.struct_defs.remove(struct_name) {
+                            let mut def = def;
+                            def.name = new_name.clone();
+                            self.struct_defs.insert(new_name.clone(), def);
+                        }
+                        ty = Type::Struct(new_name.clone());
+                        first_typedef_name = Some(new_name);
+                        base = ty.clone();
+                    } else if let Some(n) = &first_typedef_name {
+                        ty = Type::Struct(n.clone());
+                    }
+                }
+            }
+            self.typedefs.insert(name, ty);
+            if self.consume_punct(";") {
+                break;
+            }
+            self.expect_punct(",");
+        }
+    }
+
+    fn fix_unsized_array_global(&self, ty: Type, init: Option<&ConstValue>) -> Type {
+        match ty {
+            Type::Array(elem, 0) => {
+                if let Some(ConstValue::Str(s)) = init {
+                    let n = s.as_bytes().len() + 1;
+                    Type::Array(elem, n)
+                } else {
+                    panic!("Unsized array requires string literal initializer");
+                }
+            }
+            _ => ty,
+        }
+    }
+
+    fn fix_unsized_array_local(&self, ty: Type, init: Option<&Expr>) -> Type {
+        match ty {
+            Type::Array(elem, 0) => {
+                if let Some(Expr { kind: ExprKind::Str(s) }) = init {
+                    let n = s.as_bytes().len() + 1;
+                    Type::Array(elem, n)
+                } else {
+                    panic!("Unsized array requires string literal initializer");
+                }
+            }
+            _ => ty,
+        }
+    }
 }
 
 fn eval_const_expr(expr: &Expr) -> Option<ConstValue> {
     match &expr.kind {
         ExprKind::Num(n) => Some(ConstValue::Int(*n)),
         ExprKind::Float(f) => Some(ConstValue::Float(*f)),
+        ExprKind::Str(s) => Some(ConstValue::Str(s.clone())),
         ExprKind::Unary { op: UnOp::Pos, expr } => eval_const_expr(expr),
         ExprKind::Unary { op: UnOp::Neg, expr } => match eval_const_expr(expr) {
             Some(ConstValue::Int(v)) => Some(ConstValue::Int(-v)),
@@ -720,6 +1028,7 @@ fn eval_const_expr(expr: &Expr) -> Option<ConstValue> {
                     };
                     Some(ConstValue::Float(v))
                 }
+                _ => None,
             }
         }
         ExprKind::Cast { ty, expr } => {
@@ -729,8 +1038,24 @@ fn eval_const_expr(expr: &Expr) -> Option<ConstValue> {
                 (Type::Float, ConstValue::Float(f)) => Some(ConstValue::Float(f)),
                 (_, ConstValue::Float(f)) => Some(ConstValue::Int(f as i64)),
                 (_, ConstValue::Int(i)) => Some(ConstValue::Int(i)),
+                (_, ConstValue::Str(s)) => Some(ConstValue::Str(s)),
             }
         }
         _ => None,
+    }
+}
+
+fn eval_const_expr_int(expr: &Expr) -> Option<i64> {
+    match eval_const_expr(expr)? {
+        ConstValue::Int(v) => Some(v),
+        _ => None,
+    }
+}
+
+fn align_up_usize(v: usize, align: usize) -> usize {
+    if align <= 1 {
+        v
+    } else {
+        ((v + align - 1) / align) * align
     }
 }

@@ -15,9 +15,11 @@ pub struct Token {
     pub pos: usize, // byte offset
 }
 
-const KEYWORDS: [&str; 10] = [
+const KEYWORDS: [&str; 18] = [
     "char", "int", "long", "float", "void",
-    "return", "if", "else", "while", "asm",
+    "return", "if", "else", "while", "for",
+    "asm", "break", "continue", "switch", "case",
+    "default", "struct", "typedef",
 ];
 
 pub struct Tokenizer<'a> {
@@ -228,7 +230,7 @@ impl<'a> Tokenizer<'a> {
         }
 
         // two-char punctuators
-        let two_char = ["==", "!=", "<=", ">=", "&&", "||"];
+        let two_char = ["==", "!=", "<=", ">=", "&&", "||", "++", "->"];
         for op in &two_char {
             if self.starts_with(op) {
                 self.pos += 2;
@@ -240,7 +242,7 @@ impl<'a> Tokenizer<'a> {
         }
 
         // single-char punctuators
-        let single = "+-*/(){}[];,<>=&!";
+        let single = "+-*/(){}[];,<>=&!:.";
         if single.contains(c) {
             self.bump();
             return Token {

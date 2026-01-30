@@ -2,6 +2,21 @@
 
 This document describes the syntax accepted by the current compiler implementation in `src/compiler/tokenizer.rs` and `src/compiler/compiler.rs`. It is intentionally a **small C subset**.
 
+## Output Format
+
+The compiler emits a single binary file via the shared assembler/linker pipeline.
+The file layout is:
+
+- Header: 6 little‑endian `u32` values
+  1. `TEXT_BASE`
+  2. `TEXT_SIZE` (bytes)
+  3. `DATA_BASE`
+  4. `DATA_SIZE` (bytes)
+  5. `BSS_BASE`
+  6. `BSS_SIZE` (bytes)
+- Text section: instruction stream, `u64` little‑endian
+- Data section: raw bytes
+
 ## 1. Lexical Structure
 
 ### 1.1 Character Set and Whitespace
@@ -13,15 +28,18 @@ This document describes the syntax accepted by the current compiler implementati
 - Block comments: `/* ... */` (not nested). Unterminated block comments are not diagnosed explicitly.
 
 ### 1.3 Tokens
-- **Keywords**: `char`, `int`, `long`, `float`, `void`, `return`, `if`, `else`, `while`, `asm`
+- **Keywords**: `char`, `int`, `long`, `float`, `void`, `return`, `if`, `else`, `while`, `for`,
+  `break`, `continue`, `switch`, `case`, `default`, `struct`, `typedef`, `asm`
 - **Identifiers**: `[A-Za-z_][A-Za-z0-9_]*`
 - **Integer literals**: decimal or hex (`0x...`)
 - **Float literals**: decimal with fractional and/or exponent parts (e.g. `1.0`, `3.14`, `2e3`, `4.2e-1`)
+- **String literals**: double-quoted strings with basic escapes (`\n`, `\r`, `\t`, `\\`, `\"`)
 - **Punctuators/operators**:
   - Two‑char: `==` `!=` `<=` `>=` `&&` `||`
-  - Single‑char: `+ - * / ( ) { } [ ] , ; < > = & !`
+  - Single‑char: `+ - * / ( ) { } [ ] , ; : < > = & ! .`
+  - Other: `->`
 
-Not supported by the tokenizer: character literals, string literals, octal literals, `++`, `--`, `->`, `.` , `%`, bitwise operators, `?:`, `sizeof`.
+Not supported by the tokenizer: character literals, octal literals, `--`, `%`, bitwise operators, `?:`, `sizeof`.
 
 ## 2. Grammar (EBNF)
 
@@ -67,9 +85,13 @@ Notes:
 stmt              ::= return_stmt
                     | if_stmt
                     | while_stmt
+                    | for_stmt
+                    | switch_stmt
                     | block
                     | decl_stmt
                     | expr_stmt
+                    | break_stmt
+                    | continue_stmt
 
 return_stmt       ::= "return" expr? ";"
 
@@ -77,10 +99,18 @@ if_stmt           ::= "if" "(" expr ")" stmt ("else" stmt)?
 
 while_stmt        ::= "while" "(" expr ")" stmt
 
+for_stmt          ::= "for" "(" (decl_stmt | expr? ";") expr? ";" expr? ")" stmt
+
+switch_stmt       ::= "switch" "(" expr ")" "{" switch_item* "}"
+switch_item       ::= "case" const_expr ":" | "default" ":" | stmt
+
+break_stmt        ::= "break" ";"
+continue_stmt     ::= "continue" ";"
+
 expr_stmt         ::= expr? ";"
 ```
 
-Not supported: `for`, `do`, `switch`, `case`, `break`, `continue`, labels, `goto`.
+Not supported: `do`, labels, `goto`.
 
 ### 2.4 Expressions
 ```
@@ -110,20 +140,23 @@ postfix           ::= primary ("[" expr "]")*
 
 primary           ::= int_literal
                     | float_literal
+                    | string_literal
                     | ident
                     | ident "(" arg_list? ")"
                     | "(" expr ")"
+                    | primary "." ident
+                    | primary "->" ident
 
 arg_list          ::= expr ("," expr)*
 ```
 
-Not supported: comma operator in expressions, `%`, bitwise ops, `++/--`, `sizeof`, `?:`, member access, string/char literals.
+Not supported: comma operator in expressions, `%`, bitwise ops, `--`, `sizeof`, `?:`, char literals.
 
 ## 3. Semantics and Limits
 
 ### 3.1 Types
-- `char`, `int`, `long`, `float`, `void`, pointers (`*`), and fixed‑size arrays (`[N]`).
-- Array size must be a **decimal integer literal**.
+- `char`, `int`, `long`, `float`, `void`, pointers (`*`), arrays (`[N]`), and `struct` (via `typedef`).
+- Array size must be a **decimal integer literal**, except `char[] = "..."` which infers size.
 - Array types decay to pointers in parameter lists and in expression contexts.
  - `char` is 1 byte. `int`, `long`, `float`, pointers are 4 bytes and aligned to 4-byte boundaries.
  - `LOAD`/`STORE` are used for `char`; `LOAD32`/`STORE32` are used for 32-bit types.
@@ -132,7 +165,7 @@ Not supported: comma operator in expressions, `%`, bitwise ops, `++/--`, `sizeof
 - Block scope with shadowing; implemented via nested scopes.
 - Global variables are supported at top level.
   - Initializers must be constant expressions (numeric literals with `+ - * /` and casts).
-  - Array global initializers are not supported yet.
+  - String literals are allowed for `char[]` and `char*`.
 
 ### 3.3 Functions
 - Function definitions only; no prototypes.
@@ -140,7 +173,7 @@ Not supported: comma operator in expressions, `%`, bitwise ops, `++/--`, `sizeof
 - Return type is `int` or `void`. If a non‑void function reaches the end without `return`, it returns `0`.
 
 ### 3.4 Lvalues and Assignment
-- Assignable: variables, `*ptr`, and `base[index]`.
+- Assignable: variables, `*ptr`, `base[index]`, and struct members (`.` / `->`).
 - Arrays cannot be assigned to directly (`int a[4]; a = ...` errors).
 
 ### 3.5 Pointer Arithmetic
@@ -164,7 +197,7 @@ Errors are raised via `panic!` with simple messages, e.g.
 
 - Preprocessor (`#include`, `#define`, ...)
 - `short`, `double`
-- `struct`, `enum`, `typedef`, `const`, `static`, `extern`
-- `for`, `do`, `switch`, `break`, `continue`
-- `%`, bitwise ops, `?:`, `sizeof`, casts
-- string/character literals, hex/octal literals
+- `enum`, `const`, `static`, `extern`
+- `do`
+- `%`, bitwise ops, `?:`, `sizeof`
+- character literals, octal literals

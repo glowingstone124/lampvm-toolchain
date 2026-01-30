@@ -11,10 +11,11 @@ pub enum Type {
     Void,
     Ptr(Box<Type>),
     Array(Box<Type>, usize),
+    Struct(String),
 }
 
 impl Type {
-    fn size(&self) -> usize {
+    pub(crate) fn size_with(&self, structs: &HashMap<String, StructDef>) -> usize {
         match self {
             Type::Int => 4,
             Type::Long => 4,
@@ -22,12 +23,29 @@ impl Type {
             Type::Char => 1,
             Type::Void => 0,
             Type::Ptr(_) => 4,
-            Type::Array(elem, n) => elem.size() * *n,
+            Type::Array(elem, n) => elem.size_with(structs) * *n,
+            Type::Struct(name) => structs
+                .get(name)
+                .unwrap_or_else(|| panic!("Unknown struct type: {}", name))
+                .size,
         }
     }
 
     pub(crate) fn is_array(&self) -> bool {
         matches!(self, Type::Array(_, _))
+    }
+
+    pub(crate) fn align_with(&self, structs: &HashMap<String, StructDef>) -> usize {
+        match self {
+            Type::Char => 1,
+            Type::Int | Type::Long | Type::Float | Type::Ptr(_) => 4,
+            Type::Array(elem, _) => elem.align_with(structs),
+            Type::Struct(name) => structs
+                .get(name)
+                .unwrap_or_else(|| panic!("Unknown struct type: {}", name))
+                .align,
+            Type::Void => 1,
+        }
     }
 
     pub(crate) fn decay(&self) -> Type {
@@ -40,15 +58,31 @@ impl Type {
 
 #[derive(Debug, Clone)]
 pub struct Var {
-    name: String,
-    ty: Type,
-    offset: i32,
+    pub(crate) name: String,
+    pub(crate) ty: Type,
+    pub(crate) offset: i32,
 }
 
 #[derive(Debug, Clone)]
 pub enum ConstValue {
     Int(i64),
     Float(f32),
+    Str(String),
+}
+
+#[derive(Debug, Clone)]
+pub struct StructField {
+    pub name: String,
+    pub ty: Type,
+    pub offset: usize,
+}
+
+#[derive(Debug, Clone)]
+pub struct StructDef {
+    pub name: String,
+    pub fields: Vec<StructField>,
+    pub size: usize,
+    pub align: usize,
 }
 
 #[derive(Debug, Clone)]
@@ -71,6 +105,7 @@ pub struct Function {
 pub struct Program {
     pub(crate) funcs: Vec<Function>,
     pub(crate) globals: Vec<Global>,
+    pub(crate) struct_defs: HashMap<String, StructDef>,
 }
 
 #[derive(Debug, Clone)]
@@ -85,10 +120,35 @@ pub enum Stmt {
         cond: Expr,
         body: Box<Stmt>,
     },
+    For {
+        init: Option<ForInit>,
+        cond: Option<Expr>,
+        step: Option<Expr>,
+        body: Box<Stmt>,
+    },
+    Switch {
+        expr: Expr,
+        items: Vec<SwitchItem>,
+    },
     Block(Vec<Stmt>),
     ExprStmt(Option<Expr>),
     Decl(Vec<(usize, Option<Expr>)>),
     InlineAsm(String),
+    Break,
+    Continue,
+}
+
+#[derive(Debug, Clone)]
+pub enum ForInit {
+    Decl(Vec<(usize, Option<Expr>)>),
+    Expr(Expr),
+}
+
+#[derive(Debug, Clone)]
+pub enum SwitchItem {
+    Case(i64),
+    Default,
+    Stmt(Stmt),
 }
 
 #[derive(Debug, Clone)]
@@ -104,6 +164,15 @@ pub enum ExprKind {
     Var(usize),
     GlobalVar(String),
     Assign(Box<Expr>, Box<Expr>),
+    Inc {
+        expr: Box<Expr>,
+        is_post: bool,
+    },
+    Member {
+        base: Box<Expr>,
+        field: String,
+        is_arrow: bool,
+    },
     Binary {
         op: BinOp,
         lhs: Box<Expr>,
@@ -199,11 +268,15 @@ impl FuncBuilder {
     }
 }
 
-pub fn assign_offsets(locals: &mut [Var], params: &[usize]) {
+pub fn assign_offsets(
+    locals: &mut [Var],
+    params: &[usize],
+    struct_defs: &HashMap<String, StructDef>,
+) {
     let mut offset = 4i32;
     for &id in params {
-        let size = locals[id].ty.size() as i32;
-        let align = if size >= 4 { 4 } else { 1 };
+        let size = locals[id].ty.size_with(struct_defs) as i32;
+        let align = locals[id].ty.align_with(struct_defs) as i32;
         offset = align_up(offset, align);
         locals[id].offset = offset;
         offset += size;
@@ -212,8 +285,8 @@ pub fn assign_offsets(locals: &mut [Var], params: &[usize]) {
         if params.contains(&i) {
             continue;
         }
-        let size = var.ty.size() as i32;
-        let align = if size >= 4 { 4 } else { 1 };
+        let size = var.ty.size_with(struct_defs) as i32;
+        let align = var.ty.align_with(struct_defs) as i32;
         offset = align_up(offset, align);
         var.offset = offset;
         offset += size;
@@ -242,6 +315,11 @@ struct Codegen<'a> {
     func_types: &'a HashMap<String, Type>,
     global_types: &'a HashMap<String, Type>,
     globals: &'a [Global],
+    struct_defs: &'a HashMap<String, StructDef>,
+    strings: Vec<(String, String)>,
+    string_map: HashMap<String, String>,
+    break_stack: Vec<String>,
+    continue_stack: Vec<String>,
 }
 
 impl<'a> Codegen<'a> {
@@ -249,6 +327,7 @@ impl<'a> Codegen<'a> {
         func_types: &'a HashMap<String, Type>,
         global_types: &'a HashMap<String, Type>,
         globals: &'a [Global],
+        struct_defs: &'a HashMap<String, StructDef>,
     ) -> Self {
         Codegen {
             out: Vec::new(),
@@ -256,6 +335,11 @@ impl<'a> Codegen<'a> {
             func_types,
             global_types,
             globals,
+            struct_defs,
+            strings: Vec::new(),
+            string_map: HashMap::new(),
+            break_stack: Vec::new(),
+            continue_stack: Vec::new(),
         }
     }
 
@@ -275,6 +359,16 @@ impl<'a> Codegen<'a> {
 
     fn is_char_type(ty: &Type) -> bool {
         matches!(ty, Type::Char)
+    }
+
+    fn string_label(&mut self, s: &str) -> String {
+        if let Some(label) = self.string_map.get(s) {
+            return label.clone();
+        }
+        let label = format!("_Lstr_{}", self.string_map.len());
+        self.string_map.insert(s.to_string(), label.clone());
+        self.strings.push((label.clone(), s.to_string()));
+        label
     }
 
     fn emit_load_var(&mut self, ty: &Type, offset: i32) {
@@ -408,6 +502,7 @@ impl<'a> Codegen<'a> {
             self.gen_function(func);
         }
         self.gen_globals();
+        self.gen_string_literals();
     }
 
     fn gen_globals(&mut self) {
@@ -421,8 +516,8 @@ impl<'a> Codegen<'a> {
         let mut bss_offset: u32 = 0;
 
         for g in self.globals {
-            let size = g.ty.size() as u32;
-            let align = if size >= 4 { 4 } else { 1 };
+            let size = g.ty.size_with(self.struct_defs) as u32;
+            let align = g.ty.align_with(self.struct_defs) as u32;
             if let Some(init) = &g.init {
                 let aligned = align_up_u32(data_offset, align);
                 if aligned > data_offset {
@@ -444,6 +539,23 @@ impl<'a> Codegen<'a> {
                     (Type::Float, ConstValue::Int(v)) => {
                         let f = *v as f32;
                         data_lines.push(format!(".long {}", f.to_bits()));
+                    }
+                    (Type::Ptr(_), ConstValue::Str(s)) => {
+                        let label = self.string_label(s);
+                        data_lines.push(format!(".long {}", label));
+                    }
+                    (Type::Array(elem, n), ConstValue::Str(s)) if matches!(&**elem, Type::Char) => {
+                        let bytes = s.as_bytes();
+                        let needed = bytes.len() + 1;
+                        if *n != 0 && needed > *n {
+                            panic!("String literal too long for array {}", g.name);
+                        }
+                        let emit_len = if *n == 0 { needed } else { *n };
+                        data_lines.push(format!(".ascii \"{}\"", escape_asm_string(s)));
+                        data_lines.push(".byte 0".to_string());
+                        if emit_len > needed {
+                            data_lines.push(format!(".zero {}", emit_len - needed));
+                        }
                     }
                     _ => panic!("Unsupported global initializer for {}", g.name),
                 }
@@ -472,6 +584,18 @@ impl<'a> Codegen<'a> {
             for line in bss_lines {
                 self.emit(line);
             }
+        }
+    }
+
+    fn gen_string_literals(&mut self) {
+        if self.strings.is_empty() {
+            return;
+        }
+        let strings = std::mem::take(&mut self.strings);
+        self.emit(".data");
+        for (label, value) in strings {
+            self.emit(format!("{}:", label));
+            self.emit(format!(".asciz \"{}\"", escape_asm_string(&value)));
         }
     }
 
@@ -515,7 +639,7 @@ impl<'a> Codegen<'a> {
     fn frame_size(&self, func: &Function) -> i32 {
         let mut max = 4i32;
         for var in &func.locals {
-            let end = var.offset + var.ty.size() as i32;
+            let end = var.offset + var.ty.size_with(self.struct_defs) as i32;
             if end > max {
                 max = end;
             }
@@ -562,6 +686,8 @@ impl<'a> Codegen<'a> {
             Stmt::While { cond, body } => {
                 let begin_label = self.new_label("Lbegin");
                 let end_label = self.new_label("Lend");
+                self.break_stack.push(end_label.clone());
+                self.continue_stack.push(begin_label.clone());
                 self.emit(format!("{}:", begin_label));
                 self.gen_expr(cond, func);
                 let cty = self.expr_type(cond, func);
@@ -570,6 +696,99 @@ impl<'a> Codegen<'a> {
                 self.gen_stmt(body, func, ret_label);
                 self.emit(format!("jmp {}", begin_label));
                 self.emit(format!("{}:", end_label));
+                self.continue_stack.pop();
+                self.break_stack.pop();
+            }
+            Stmt::For { init, cond, step, body } => {
+                if let Some(init) = init {
+                    match init {
+                        ForInit::Decl(vars) => {
+                            self.gen_stmt(&Stmt::Decl(vars.clone()), func, ret_label);
+                        }
+                        ForInit::Expr(expr) => {
+                            self.gen_expr(expr, func);
+                        }
+                    }
+                }
+                let begin_label = self.new_label("Lfor_begin");
+                let step_label = self.new_label("Lfor_step");
+                let end_label = self.new_label("Lfor_end");
+                self.break_stack.push(end_label.clone());
+                self.continue_stack.push(step_label.clone());
+                self.emit(format!("{}:", begin_label));
+                if let Some(cond) = cond {
+                    self.gen_expr(cond, func);
+                    let cty = self.expr_type(cond, func);
+                    self.emit_cmp_zero_for_type(&cty);
+                    self.emit(format!("jz {}", end_label));
+                }
+                self.gen_stmt(body, func, ret_label);
+                self.emit(format!("{}:", step_label));
+                if let Some(step) = step {
+                    self.gen_expr(step, func);
+                }
+                self.emit(format!("jmp {}", begin_label));
+                self.emit(format!("{}:", end_label));
+                self.continue_stack.pop();
+                self.break_stack.pop();
+            }
+            Stmt::Switch { expr, items } => {
+                let end_label = self.new_label("Lswitch_end");
+                self.break_stack.push(end_label.clone());
+
+                self.gen_expr(expr, func);
+                self.emit("mov r1, r0");
+
+                let mut case_labels: Vec<(i64, String)> = Vec::new();
+                let mut default_label: Option<String> = None;
+
+                for item in items {
+                    if let SwitchItem::Case(v) = item {
+                        if case_labels.iter().any(|(val, _)| val == v) {
+                            panic!("Duplicate case value {}", v);
+                        }
+                        case_labels.push((*v, self.new_label("Lcase")));
+                    } else if let SwitchItem::Default = item {
+                        if default_label.is_some() {
+                            panic!("Duplicate default label in switch");
+                        }
+                        default_label = Some(self.new_label("Ldefault"));
+                    }
+                }
+
+                for (val, label) in &case_labels {
+                    self.emit(format!("cmpi r1, {}", *val as i32));
+                    self.emit(format!("jz {}", label));
+                }
+                if let Some(def_label) = &default_label {
+                    self.emit(format!("jmp {}", def_label));
+                } else {
+                    self.emit(format!("jmp {}", end_label));
+                }
+
+                let mut case_iter = case_labels.into_iter();
+                let mut next_case_label: Option<(i64, String)> = case_iter.next();
+                for item in items {
+                    match item {
+                        SwitchItem::Case(_) => {
+                            if let Some((_, label)) = next_case_label.take() {
+                                self.emit(format!("{}:", label));
+                                next_case_label = case_iter.next();
+                            }
+                        }
+                        SwitchItem::Default => {
+                            if let Some(def_label) = &default_label {
+                                self.emit(format!("{}:", def_label));
+                            }
+                        }
+                        SwitchItem::Stmt(stmt) => {
+                            self.gen_stmt(stmt, func, ret_label);
+                        }
+                    }
+                }
+
+                self.emit(format!("{}:", end_label));
+                self.break_stack.pop();
             }
             Stmt::Block(stmts) => {
                 for s in stmts {
@@ -588,9 +807,36 @@ impl<'a> Codegen<'a> {
             Stmt::Decl(vars) => {
                 for (id, init) in vars {
                     if let Some(expr) = init {
+                        let lty = &func.locals[*id].ty;
+                        if let ExprKind::Str(s) = &expr.kind {
+                            if let Type::Array(elem, n) = lty {
+                                if !matches!(&**elem, Type::Char) {
+                                    panic!("String literal can only init char arrays");
+                                }
+                                let bytes = s.as_bytes();
+                                let needed = bytes.len() + 1;
+                                if *n != 0 && needed > *n {
+                                    panic!("String literal too long for array");
+                                }
+                                self.gen_lvalue(&Expr { kind: ExprKind::Var(*id) }, func);
+                                self.emit("mov r1, r0");
+                                for (i, b) in bytes.iter().enumerate() {
+                                    self.emit(format!("movi r0, {}", *b as u32));
+                                    self.emit(format!("store [r1 + {}], r0", i));
+                                }
+                                self.emit("movi r0, 0");
+                                self.emit(format!("store [r1 + {}], r0", bytes.len()));
+                                if *n != 0 && needed < *n {
+                                    for i in needed..*n {
+                                        self.emit("movi r0, 0");
+                                        self.emit(format!("store [r1 + {}], r0", i));
+                                    }
+                                }
+                                continue;
+                            }
+                        }
                         self.gen_expr(expr, func);
                         let rty = self.expr_type(expr, func);
-                        let lty = &func.locals[*id].ty;
                         self.cast_reg(&rty, lty);
                         let offset = func.locals[*id].offset;
                         self.emit_store_var(lty, offset);
@@ -598,6 +844,18 @@ impl<'a> Codegen<'a> {
                 }
             },
             Stmt::ExprStmt(None) => {
+            }
+            Stmt::Break => {
+                let target = self.break_stack.last().unwrap_or_else(|| {
+                    panic!("break used outside of loop/switch")
+                });
+                self.emit(format!("jmp {}", target));
+            }
+            Stmt::Continue => {
+                let target = self.continue_stack.last().unwrap_or_else(|| {
+                    panic!("continue used outside of loop")
+                });
+                self.emit(format!("jmp {}", target));
             }
         }
     }
@@ -612,10 +870,16 @@ impl<'a> Codegen<'a> {
                 self.emit(format!("movi r0, {}", bits));
             }
             ExprKind::Str(_) => {
-                panic!("String literals are not supported in expressions");
+                if let ExprKind::Str(s) = &expr.kind {
+                    let label = self.string_label(s);
+                    self.emit(format!("movi r0, {}", label));
+                }
             }
             ExprKind::Var(id) => {
                 let var = &func.locals[*id];
+                if matches!(var.ty, Type::Struct(_)) {
+                    panic!("Struct values cannot be used directly; access fields instead");
+                }
                 if var.ty.is_array() {
                     self.gen_lvalue(expr, func);
                 } else {
@@ -627,6 +891,9 @@ impl<'a> Codegen<'a> {
                     .global_types
                     .get(name)
                     .unwrap_or_else(|| panic!("Undefined global: {}", name));
+                if matches!(gty, Type::Struct(_)) {
+                    panic!("Struct values cannot be used directly; access fields instead");
+                }
                 if gty.is_array() {
                     self.emit(format!("movi r0, {}", name));
                 } else {
@@ -643,6 +910,9 @@ impl<'a> Codegen<'a> {
                     if lty.is_array() {
                         panic!("Cannot assign to array");
                     }
+                    if matches!(lty, Type::Struct(_)) {
+                        panic!("Cannot assign struct values");
+                    }
                     let rty = self.expr_type(rhs, func);
                     self.cast_reg(&rty, &lty);
                 }
@@ -651,6 +921,14 @@ impl<'a> Codegen<'a> {
                 } else {
                     self.emit("store32 [r1], r0");
                 }
+            }
+            ExprKind::Inc { expr, is_post } => {
+                self.gen_inc(expr, *is_post, func);
+            }
+            ExprKind::Member { .. } => {
+                self.gen_lvalue(expr, func);
+                let rty = self.expr_type(expr, func);
+                self.emit_load_from_addr(&rty, "r0");
             }
             ExprKind::Binary { op, lhs, rhs } => {
                 self.gen_binary(*op, lhs, rhs, func);
@@ -676,7 +954,7 @@ impl<'a> Codegen<'a> {
                 }
                 self.emit(format!("call {}", name));
             }
-            ExprKind::Index { base, index } => {
+            ExprKind::Index { .. } => {
                 self.gen_lvalue(expr, func);
                 let rty = self.expr_type(expr, func);
                 self.emit_load_from_addr(&rty, "r0");
@@ -729,6 +1007,48 @@ impl<'a> Codegen<'a> {
                 self.emit("movi r0, 1");
                 self.emit(format!("{}:", end));
             }
+        }
+    }
+
+    fn gen_inc(&mut self, expr: &Expr, is_post: bool, func: &Function) {
+        let lty = self
+            .lvalue_type(expr, func)
+            .unwrap_or_else(|| panic!("++ operand is not an lvalue"));
+        if lty.is_array() {
+            panic!("++ not allowed on array type");
+        }
+
+        self.gen_lvalue(expr, func);
+        self.emit("mov r1, r0"); // r1 = addr
+        self.emit_load_from_addr(&lty, "r1");
+
+        if is_post {
+            self.emit("push r0");
+        }
+
+        match &lty {
+            Type::Float => {
+                self.emit("movi r2, 0x3F800000"); // 1.0f
+                self.emit("fadd r0, r0, r2");
+            }
+            Type::Ptr(elem) => {
+                let sz = elem.size_with(self.struct_defs);
+                if sz == 1 {
+                    self.emit("inc r0");
+                } else {
+                    self.emit(format!("movi r2, {}", sz));
+                    self.emit("add r0, r0, r2");
+                }
+            }
+            _ => {
+                self.emit("inc r0");
+            }
+        }
+
+        self.emit_store_to_addr(&lty, "r1");
+
+        if is_post {
+            self.emit("pop r0");
         }
     }
 
@@ -875,7 +1195,7 @@ impl<'a> Codegen<'a> {
                         self.gen_expr(lhs, func);
                         self.emit("push r0");
                         self.gen_expr(rhs, func);
-                        self.scale_reg("r0", elem.size());
+                        self.scale_reg("r0", elem.size_with(self.struct_defs));
                         self.emit("pop r1");
                         let inst = if matches!(op, BinOp::Add) { "add" } else { "sub" };
                         self.emit(format!("{} r0, r1, r0", inst));
@@ -888,7 +1208,7 @@ impl<'a> Codegen<'a> {
                         self.emit("push r0");
                         self.gen_expr(rhs, func);
                         self.emit("pop r1");
-                        self.scale_reg("r1", elem.size());
+                        self.scale_reg("r1", elem.size_with(self.struct_defs));
                         self.emit("add r0, r0, r1");
                     }
                     (Type::Ptr(elem), Type::Ptr(_)) => {
@@ -900,8 +1220,9 @@ impl<'a> Codegen<'a> {
                         self.gen_expr(rhs, func);
                         self.emit("pop r1");
                         self.emit("sub r0, r1, r0");
-                        if elem.size() != 1 {
-                            self.emit(format!("movi r1, {}", elem.size()));
+                        let esz = elem.size_with(self.struct_defs);
+                        if esz != 1 {
+                            self.emit(format!("movi r1, {}", esz));
                             self.emit("div r0, r0, r1");
                         }
                     }
@@ -972,6 +1293,18 @@ impl<'a> Codegen<'a> {
             ExprKind::Unary { op: UnOp::Deref, expr } => {
                 self.gen_expr(expr, func);
             }
+            ExprKind::Member { base, field, is_arrow } => {
+                let (offset, _fty) = self.member_offset(base, field, *is_arrow, func);
+                if *is_arrow {
+                    self.gen_expr(base, func);
+                } else {
+                    self.gen_lvalue(base, func);
+                }
+                if offset != 0 {
+                    self.emit(format!("movi r1, {}", offset as i32));
+                    self.emit("add r0, r0, r1");
+                }
+            }
             ExprKind::Index { base, index } => {
                 let base_ty = self.expr_type(base, func);
                 let elem = match base_ty {
@@ -982,7 +1315,7 @@ impl<'a> Codegen<'a> {
                 self.gen_base_ptr(base, func);
                 self.emit("push r0");
                 self.gen_expr(index, func);
-                self.scale_reg("r0", elem.size());
+                self.scale_reg("r0", elem.size_with(self.struct_defs));
                 self.emit("pop r1");
                 self.emit("add r0, r1, r0");
             }
@@ -1020,7 +1353,7 @@ impl<'a> Codegen<'a> {
         match &expr.kind {
             ExprKind::Num(_) => Type::Int,
             ExprKind::Float(_) => Type::Float,
-            ExprKind::Str(_) => panic!("String literals are not supported in expressions"),
+            ExprKind::Str(_) => Type::Ptr(Box::new(Type::Char)),
             ExprKind::Var(id) => func.locals[*id].ty.decay(),
             ExprKind::GlobalVar(name) => self
                 .global_types
@@ -1028,6 +1361,15 @@ impl<'a> Codegen<'a> {
                 .unwrap_or_else(|| panic!("Undefined global: {}", name))
                 .decay(),
             ExprKind::Assign(lhs, _) => self.expr_type(lhs, func),
+            ExprKind::Inc { expr, .. } => {
+                let ty = self
+                    .lvalue_type(expr, func)
+                    .unwrap_or_else(|| panic!("++ operand is not an lvalue"));
+                if ty.is_array() {
+                    panic!("++ not allowed on array type");
+                }
+                ty.decay()
+            }
             ExprKind::Binary { op, lhs, rhs } => match op {
                 BinOp::Add | BinOp::Sub => {
                     let lt = self.expr_type(lhs, func);
@@ -1087,6 +1429,11 @@ impl<'a> Codegen<'a> {
                 Type::Array(elem, _) => (*elem).clone(),
                 _ => panic!("Indexing non-pointer/array"),
             },
+            ExprKind::Member { base, field, is_arrow } => {
+                let (offset, ty) = self.member_offset(base, field, *is_arrow, func);
+                let _ = offset;
+                ty
+            }
             ExprKind::Cast {
                 ty, ..
             } => ty.clone(),
@@ -1109,8 +1456,34 @@ impl<'a> Codegen<'a> {
                 Type::Array(elem, _) => Some(*elem),
                 _ => None,
             },
+            ExprKind::Member { base, field, is_arrow } => {
+                let (_, ty) = self.member_offset(base, field, *is_arrow, func);
+                Some(ty)
+            }
             _ => None,
         }
+    }
+
+    fn member_offset(&self, base: &Expr, field: &str, is_arrow: bool, func: &Function) -> (usize, Type) {
+        let base_ty = self.expr_type(base, func);
+        let struct_name = match (is_arrow, base_ty) {
+            (true, Type::Ptr(inner)) => match *inner {
+                Type::Struct(name) => name,
+                _ => panic!("-> used on non-struct pointer"),
+            },
+            (false, Type::Struct(name)) => name,
+            _ => panic!(". used on non-struct value"),
+        };
+        let def = self
+            .struct_defs
+            .get(&struct_name)
+            .unwrap_or_else(|| panic!("Unknown struct type: {}", struct_name));
+        for f in &def.fields {
+            if f.name == field {
+                return (f.offset, f.ty.clone());
+            }
+        }
+        panic!("Unknown field {} in struct {}", field, struct_name);
     }
 }
 
@@ -1135,7 +1508,12 @@ pub fn compile(input: &String, _arch: &ArchConfig, mode: EmitMode) -> String {
     let mut parser = Parser::new(tokens);
     let prog = parser.parse_program();
 
-    let mut codegen = Codegen::new(&parser.func_types, &parser.global_types, &prog.globals);
+    let mut codegen = Codegen::new(
+        &parser.func_types,
+        &parser.global_types,
+        &prog.globals,
+        &prog.struct_defs,
+    );
     codegen.gen_program(&prog, mode);
 
     let mut asm_output = String::new();
@@ -1144,6 +1522,22 @@ pub fn compile(input: &String, _arch: &ArchConfig, mode: EmitMode) -> String {
         asm_output.push('\n');
     }
     asm_output
+}
+
+fn escape_asm_string(s: &str) -> String {
+    let mut out = String::new();
+    for ch in s.chars() {
+        match ch {
+            '\\' => out.push_str("\\\\"),
+            '"' => out.push_str("\\\""),
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            '\t' => out.push_str("\\t"),
+            '\0' => out.push_str("\\0"),
+            _ => out.push(ch),
+        }
+    }
+    out
 }
 
 #[cfg(test)]
@@ -1219,8 +1613,40 @@ mod tests {
     }
 
     #[test]
-    #[should_panic]
-    fn reject_for_loop() {
-        compile_ok("int main(){for(;;){} return 0;}");
+    fn compile_pre_increment() {
+        let asm = compile_ok("int main(){int x=1; return ++x;}");
+        assert!(asm.contains("inc r0"));
+    }
+
+    #[test]
+    fn compile_post_increment() {
+        let asm = compile_ok("int main(){int x=1; return x++;}");
+        assert!(asm.contains("inc r0"));
+    }
+
+    #[test]
+    fn compile_for_break_continue() {
+        let asm = compile_ok("int main(){int i=0; for(i=0;i<10;i=i+1){ if(i==3) continue; if(i==5) break; } return i;}");
+        assert!(asm.contains("Lfor_begin"));
+        assert!(asm.contains("Lfor_end"));
+    }
+
+    #[test]
+    fn compile_switch() {
+        let asm = compile_ok("int main(){int x=2; switch(x){case 1: x=3; break; case 2: x=4; default: x=5;} return x;}");
+        assert!(asm.contains("Lswitch_end"));
+    }
+
+    #[test]
+    fn compile_struct_and_member() {
+        let asm = compile_ok("typedef struct { int a; char b; } Foo; int main(){Foo f; f.a=1; f.b=2; return f.a;}");
+        assert!(asm.contains("store32"));
+        assert!(asm.contains("store ["));
+    }
+
+    #[test]
+    fn compile_string_literal_ptr() {
+        let asm = compile_ok("int main(){char *p=\"hi\"; return p[0];}");
+        assert!(asm.contains(".asciz"));
     }
 }

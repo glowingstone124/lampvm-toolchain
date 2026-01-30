@@ -95,8 +95,7 @@ fn main() {
                     println!("{}: 0x{:016X}", i, inst);
                 }
 
-                write_program_bin(&program.text, &output);
-                write_data_and_layout(&program, &output);
+                write_program_single(&program, &output);
             }
         }
 
@@ -125,8 +124,7 @@ fn main() {
                 println!("Assembly finished. {} instructions generated.", program.text.len());
 
                 let output_name = output.unwrap_or_else(|| replace_suffix_or_append(&input, ".c", ".bin"));
-                write_program_bin(&program.text, &output_name);
-                write_data_and_layout(&program, &output_name);
+                write_program_single(&program, &output_name);
                 println!("Output: {}", output_name);
             }
         }
@@ -139,8 +137,7 @@ fn main() {
             let program = link_objects(&inputs, &arch);
             println!("Link finished. {} instructions generated.", program.text.len());
 
-            write_program_bin(&program.text, &output);
-            write_data_and_layout(&program, &output);
+            write_program_single(&program, &output);
             println!("Output: {}", output);
         }
     }
@@ -170,36 +167,41 @@ fn replace_suffix_or_append(input: &str, from_suffix: &str, to_suffix: &str) -> 
     }
 }
 
-fn write_program_bin(binary: &[u64], output: &str) {
+fn write_program_single(program: &AssembledProgram, output: &str) {
     let mut bin_file = File::create(output).expect("Failed to create output file");
-    for inst in binary {
+
+    let text_size = (program.text.len() as u32) * 8;
+    let data_size = program.data.len() as u32;
+
+    for v in [
+        program.text_base,
+        text_size,
+        program.data_base,
+        data_size,
+        program.bss_base,
+        program.bss_size,
+    ] {
+        bin_file
+            .write_all(&v.to_le_bytes())
+            .expect("Failed to write header");
+    }
+
+    for inst in &program.text {
         bin_file
             .write_all(&inst.to_le_bytes())
             .expect("Failed to write instruction");
     }
-    bin_file.flush().expect("Failed to flush output file");
-    println!("Binary written to {}", output);
-}
 
-fn write_data_and_layout(program: &AssembledProgram, output: &str) {
     if !program.data.is_empty() {
-        let data_output = replace_suffix_or_append(output, ".bin", ".data");
-        let mut data_file = File::create(&data_output).expect("Failed to create data output file");
-        data_file.write_all(&program.data).expect("Failed to write data segment");
-        data_file.flush().expect("Failed to flush data output file");
-        println!("Data segment written to {}", data_output);
+        bin_file
+            .write_all(&program.data)
+            .expect("Failed to write data segment");
     }
 
-    let layout_output = replace_suffix_or_append(output, ".bin", ".layout");
-    let layout = format!(
-        "TEXT_BASE=0x{0:08X}\nTEXT_SIZE={1}\nDATA_BASE=0x{2:08X}\nDATA_SIZE={3}\nBSS_BASE=0x{4:08X}\nBSS_SIZE={5}\n",
-        program.text_base,
-        (program.text.len() as u32) * 8,
-        program.data_base,
-        program.data.len() as u32,
-        program.bss_base,
-        program.bss_size,
+    bin_file.flush().expect("Failed to flush output file");
+    println!("Binary written to {}", output);
+    println!(
+        "Header: TEXT_BASE=0x{:08X} TEXT_SIZE={} DATA_BASE=0x{:08X} DATA_SIZE={} BSS_BASE=0x{:08X} BSS_SIZE={}",
+        program.text_base, text_size, program.data_base, data_size, program.bss_base, program.bss_size
     );
-    fs::write(&layout_output, layout).expect("Failed to write layout file");
-    println!("Layout written to {}", layout_output);
 }

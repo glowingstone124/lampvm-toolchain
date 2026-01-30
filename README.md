@@ -1,6 +1,6 @@
 # lampvm-toolchain
 
-Currently aligned VM version: [e4f005467fb6eaaa5cedb5b2352c642aacf1a811](https://github.com/glowingstone124/lamp-vm/commit/e4f005467fb6eaaa5cedb5b2352c642aacf1a811)
+Currently aligned VM version: [5d3ddf09e0a8315dc4838efa44cd7861e65f9976](https://github.com/glowingstone124/lamp-vm/commit/5d3ddf09e0a8315dc4838efa44cd7861e65f9976)
 
 This is the development toolchain for [lampvm](https://github.com/glowingstone124/lamp-vm).
 
@@ -53,6 +53,22 @@ macros:
 ```
 
 These settings are consistent with the VM's default configuration. In most cases, you do not need to change them. However, if you have a customized VM, please update this file to match your modifications.
+
+# Output Format (Single File)
+
+The toolchain now emits a single binary file. The file layout is:
+
+- Header: 6 little‑endian `u32` values
+  1. `TEXT_BASE`
+  2. `TEXT_SIZE` (bytes)
+  3. `DATA_BASE`
+  4. `DATA_SIZE` (bytes)
+  5. `BSS_BASE`
+  6. `BSS_SIZE` (bytes)
+- Text section: instruction stream, `u64` little‑endian
+- Data section: raw bytes
+
+No separate `.data` or `.layout` files are produced.
 
 # Roadmap
 

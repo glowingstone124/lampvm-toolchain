@@ -57,7 +57,8 @@ pub enum Opcode {
     OP_ITOF,
     OP_FTOI,
     OP_FLOAD32,
-    OP_FSTORE32
+    OP_FSTORE32,
+    OP_INC
 }
 impl Opcode {
     pub fn parse(s: &str) -> Option<Self> {
@@ -116,6 +117,7 @@ impl Opcode {
             "FTOI" => Some(Opcode::OP_FTOI),
             "FLOAD32" => Some(Opcode::OP_FLOAD32),
             "FSTORE32" => Some(Opcode::OP_FSTORE32),
+            "INC" => Some(Opcode::OP_INC),
             _ => None,
         }
     }
@@ -170,7 +172,7 @@ impl Opcode {
             | Opcode::OP_JNC
             | Opcode::OP_CALL => InstFormat::I,
 
-            Opcode::OP_PUSH | Opcode::OP_POP | Opcode::OP_INT => InstFormat::Rd,
+            Opcode::OP_INC | Opcode::OP_PUSH | Opcode::OP_POP | Opcode::OP_INT => InstFormat::Rd,
 
             Opcode::OP_STOREX32 | Opcode::OP_LOADX32 => InstFormat::RdRsRsImm,
 
