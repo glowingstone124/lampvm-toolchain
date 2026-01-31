@@ -177,7 +177,7 @@ impl Parser {
             } else {
                 let mut decls = Vec::new();
                 let init = if self.consume_punct("=") {
-                    Some(self.parse_global_init())
+                    Some(self.parse_global_init(&decl_type))
                 } else {
                     None
                 };
@@ -185,7 +185,7 @@ impl Parser {
                 while self.consume_punct(",") {
                     let (ty, name) = self.parse_declarator(base_type.clone());
                     let init = if self.consume_punct("=") {
-                        Some(self.parse_global_init())
+                        Some(self.parse_global_init(&ty))
                     } else {
                         None
                     };
@@ -199,8 +199,8 @@ impl Parser {
                     }
                     let ty = self.fix_unsized_array_global(ty, init.as_ref());
                     if ty.is_array() && init.is_some() {
-                        if !matches!(init, Some(ConstValue::Str(_))) {
-                            panic!("Array global initializers are only supported for string literals: {}", name);
+                        if !matches!(init, Some(ConstValue::Str(_)) | Some(ConstValue::Array(_))) {
+                            panic!("Array global initializers must be string literals or initializer lists: {}", name);
                         }
                     }
                     if self.global_types.insert(name.clone(), ty.clone()).is_some() {
@@ -404,11 +404,28 @@ impl Parser {
     }
 
     fn parse_assign(&mut self) -> Expr {
-        let mut node = self.parse_logical_or();
+        let mut node = self.parse_conditional();
         if self.consume_punct("=") {
             let rhs = self.parse_assign();
             node = Expr {
                 kind: ExprKind::Assign(Box::new(node), Box::new(rhs)),
+            };
+        }
+        node
+    }
+
+    fn parse_conditional(&mut self) -> Expr {
+        let mut node = self.parse_logical_or();
+        if self.consume_punct("?") {
+            let then_expr = self.parse_assign();
+            self.expect_punct(":");
+            let else_expr = self.parse_conditional();
+            node = Expr {
+                kind: ExprKind::Conditional {
+                    cond: Box::new(node),
+                    then_expr: Box::new(then_expr),
+                    else_expr: Box::new(else_expr),
+                },
             };
         }
         node
@@ -762,9 +779,37 @@ impl Parser {
         }
     }
 
-    fn parse_global_init(&mut self) -> ConstValue {
+    fn parse_global_init(&mut self, ty: &Type) -> ConstValue {
+        if self.peek_punct("{") {
+            return self.parse_init_list(ty);
+        }
         let expr = self.parse_expr();
         eval_const_expr(&expr).unwrap_or_else(|| panic!("Global initializer must be constant"))
+    }
+
+    fn parse_init_list(&mut self, ty: &Type) -> ConstValue {
+        match ty {
+            Type::Array(elem, _) => {
+                self.expect_punct("{");
+                let mut values = Vec::new();
+                if !self.consume_punct("}") {
+                    loop {
+                        let v = if self.peek_punct("{") {
+                            self.parse_init_list(elem)
+                        } else {
+                            self.parse_global_init(elem)
+                        };
+                        values.push(v);
+                        if self.consume_punct("}") {
+                            break;
+                        }
+                        self.expect_punct(",");
+                    }
+                }
+                ConstValue::Array(values)
+            }
+            _ => panic!("Initializer list only allowed for array types"),
+        }
     }
 
     fn parse_for_stmt(&mut self) -> Stmt {
@@ -948,6 +993,9 @@ impl Parser {
                 if let Some(ConstValue::Str(s)) = init {
                     let n = s.as_bytes().len() + 1;
                     Type::Array(elem, n)
+                } else if let Some(ConstValue::Array(vals)) = init {
+                    let n = vals.len();
+                    Type::Array(elem, n)
                 } else {
                     panic!("Unsized array requires string literal initializer");
                 }
@@ -1039,6 +1087,7 @@ fn eval_const_expr(expr: &Expr) -> Option<ConstValue> {
                 (_, ConstValue::Float(f)) => Some(ConstValue::Int(f as i64)),
                 (_, ConstValue::Int(i)) => Some(ConstValue::Int(i)),
                 (_, ConstValue::Str(s)) => Some(ConstValue::Str(s)),
+                (_, ConstValue::Array(_)) => None,
             }
         }
         _ => None,

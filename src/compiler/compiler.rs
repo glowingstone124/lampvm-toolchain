@@ -68,6 +68,7 @@ pub enum ConstValue {
     Int(i64),
     Float(f32),
     Str(String),
+    Array(Vec<ConstValue>),
 }
 
 #[derive(Debug, Clone)]
@@ -193,7 +194,12 @@ pub enum ExprKind {
     Cast {
         ty: Type,
         expr: Box<Expr>,
-    }
+    },
+    Conditional {
+        cond: Box<Expr>,
+        then_expr: Box<Expr>,
+        else_expr: Box<Expr>,
+    },
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -526,39 +532,7 @@ impl<'a> Codegen<'a> {
                 }
                 data_lines.push(format!(".global {}", g.name));
                 data_lines.push(format!("{}:", g.name));
-                match (&g.ty, init) {
-                    (Type::Char, ConstValue::Int(v)) => {
-                        data_lines.push(format!(".byte {}", (*v as i32) & 0xFF));
-                    }
-                    (Type::Int | Type::Long | Type::Ptr(_), ConstValue::Int(v)) => {
-                        data_lines.push(format!(".long {}", *v as i32));
-                    }
-                    (Type::Float, ConstValue::Float(f)) => {
-                        data_lines.push(format!(".long {}", f.to_bits()));
-                    }
-                    (Type::Float, ConstValue::Int(v)) => {
-                        let f = *v as f32;
-                        data_lines.push(format!(".long {}", f.to_bits()));
-                    }
-                    (Type::Ptr(_), ConstValue::Str(s)) => {
-                        let label = self.string_label(s);
-                        data_lines.push(format!(".long {}", label));
-                    }
-                    (Type::Array(elem, n), ConstValue::Str(s)) if matches!(&**elem, Type::Char) => {
-                        let bytes = s.as_bytes();
-                        let needed = bytes.len() + 1;
-                        if *n != 0 && needed > *n {
-                            panic!("String literal too long for array {}", g.name);
-                        }
-                        let emit_len = if *n == 0 { needed } else { *n };
-                        data_lines.push(format!(".ascii \"{}\"", escape_asm_string(s)));
-                        data_lines.push(".byte 0".to_string());
-                        if emit_len > needed {
-                            data_lines.push(format!(".zero {}", emit_len - needed));
-                        }
-                    }
-                    _ => panic!("Unsupported global initializer for {}", g.name),
-                }
+                self.emit_const_init(&g.ty, init, &mut data_lines, &g.name);
                 data_offset += size;
             } else {
                 let aligned = align_up_u32(bss_offset, align);
@@ -584,6 +558,61 @@ impl<'a> Codegen<'a> {
             for line in bss_lines {
                 self.emit(line);
             }
+        }
+    }
+
+    fn emit_const_init(
+        &mut self,
+        ty: &Type,
+        init: &ConstValue,
+        out: &mut Vec<String>,
+        name: &str,
+    ) {
+        match (ty, init) {
+            (Type::Char, ConstValue::Int(v)) => {
+                out.push(format!(".byte {}", (*v as i32) & 0xFF));
+            }
+            (Type::Int | Type::Long | Type::Ptr(_), ConstValue::Int(v)) => {
+                out.push(format!(".long {}", *v as i32));
+            }
+            (Type::Float, ConstValue::Float(f)) => {
+                out.push(format!(".long {}", f.to_bits()));
+            }
+            (Type::Float, ConstValue::Int(v)) => {
+                let f = *v as f32;
+                out.push(format!(".long {}", f.to_bits()));
+            }
+            (Type::Ptr(_), ConstValue::Str(s)) => {
+                let label = self.string_label(s);
+                out.push(format!(".long {}", label));
+            }
+            (Type::Array(elem, n), ConstValue::Str(s)) if matches!(&**elem, Type::Char) => {
+                let bytes = s.as_bytes();
+                let needed = bytes.len() + 1;
+                if *n != 0 && needed > *n {
+                    panic!("String literal too long for array {}", name);
+                }
+                let emit_len = if *n == 0 { needed } else { *n };
+                out.push(format!(".ascii \"{}\"", escape_asm_string(s)));
+                out.push(".byte 0".to_string());
+                if emit_len > needed {
+                    out.push(format!(".zero {}", emit_len - needed));
+                }
+            }
+            (Type::Array(elem, n), ConstValue::Array(vals)) => {
+                let count = if *n == 0 { vals.len() } else { *n };
+                let mut i = 0usize;
+                while i < count {
+                    if i < vals.len() {
+                        self.emit_const_init(elem, &vals[i], out, name);
+                    } else {
+                        let zero_size = elem.size_with(self.struct_defs);
+                        out.push(format!(".zero {}", zero_size));
+                    }
+                    i += 1;
+                }
+            }
+            _ => panic!("Unsupported global initializer for {}", name),
         }
     }
 
@@ -957,14 +986,44 @@ impl<'a> Codegen<'a> {
             ExprKind::Index { .. } => {
                 self.gen_lvalue(expr, func);
                 let rty = self.expr_type(expr, func);
-                self.emit_load_from_addr(&rty, "r0");
+                if !rty.is_array() {
+                    self.emit_load_from_addr(&rty, "r0");
+                }
             }
             ExprKind::Cast { ty, expr: inner } => {
                 let from = self.expr_type(inner, func);
                 self.gen_expr(inner, func);
                 self.cast_reg(&from, ty);
             }
+            ExprKind::Conditional { cond, then_expr, else_expr } => {
+                self.gen_expr(cond, func);
+                let t_else = self.new_label("Lcond_else");
+                let t_end = self.new_label("Lcond_end");
+                let cty = self.expr_type(cond, func);
+                self.emit_cmp_zero_for_type(&cty);
+                self.emit(format!("jz {}", t_else));
+                self.gen_expr(then_expr, func);
+                let then_ty = self.expr_type(then_expr, func);
+                let else_ty = self.expr_type(else_expr, func);
+                let res_ty = self.cond_result_type(&then_ty, &else_ty);
+                self.cast_reg(&then_ty, &res_ty);
+                self.emit(format!("jmp {}", t_end));
+                self.emit(format!("{}:", t_else));
+                self.gen_expr(else_expr, func);
+                self.cast_reg(&else_ty, &res_ty);
+                self.emit(format!("{}:", t_end));
+            }
         }
+    }
+
+    fn cond_result_type(&self, a: &Type, b: &Type) -> Type {
+        if a == b {
+            return a.clone();
+        }
+        if Self::is_float_type(a) || Self::is_float_type(b) {
+            return Type::Float;
+        }
+        Type::Int
     }
 
     fn gen_unary(&mut self, op: UnOp, expr: &Expr, func: &Function) {
@@ -1433,6 +1492,11 @@ impl<'a> Codegen<'a> {
                 let (offset, ty) = self.member_offset(base, field, *is_arrow, func);
                 let _ = offset;
                 ty
+            }
+            ExprKind::Conditional { then_expr, else_expr, .. } => {
+                let a = self.expr_type(then_expr, func);
+                let b = self.expr_type(else_expr, func);
+                self.cond_result_type(&a, &b)
             }
             ExprKind::Cast {
                 ty, ..

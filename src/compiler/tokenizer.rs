@@ -242,7 +242,7 @@ impl<'a> Tokenizer<'a> {
         }
 
         // single-char punctuators
-        let single = "+-*/(){}[];,<>=&!:.";
+        let single = "+-*/(){}[];,<>=&!:?.";
         if single.contains(c) {
             self.bump();
             return Token {
