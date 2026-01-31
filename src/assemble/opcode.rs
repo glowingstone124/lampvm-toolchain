@@ -167,6 +167,7 @@ impl Opcode {
             | Opcode::OP_JNZ
             | Opcode::OP_JG
             | Opcode::OP_JGE
+            | Opcode::OP_JL
             | Opcode::OP_JLE
             | Opcode::OP_JC
             | Opcode::OP_JNC
