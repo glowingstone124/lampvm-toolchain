@@ -148,12 +148,16 @@ impl Parser {
             let n = if self.consume_punct("]") {
                 0usize
             } else {
-                let n = match self.next().kind {
-                    TokenKind::Num(v) => v as usize,
-                    _ => panic!("Expected array size"),
-                };
+               let expr = self.parse_expr();
                 self.expect_punct("]");
-                n
+                let size = eval_const_expr_int(&expr)
+                    .unwrap_or_else(|| {
+                        panic!("Array size must be a constant int");
+                    });
+                if size < 0 {
+                    panic!("Array size must be non-negative");
+                }
+                size as usize
             };
             ty = Type::Array(Box::new(ty), n);
         }

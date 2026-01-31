@@ -1,7 +1,3 @@
-/*
-ASCII framebuffer terminal for LampVM.
-8x8 font, serial input.
-*/
 int SERIAL_TX = 0x01;
 int SERIAL_STATUS = 0x02;
 int SERIAL_RX = 0x03;
@@ -13,9 +9,22 @@ int COLS = 80;
 int ROWS = 60;
 int COLOR_ON = 0x00FFFFFF;
 int COLOR_OFF = 0x00000000;
+int BLINK_NS_LO = 250000000;
+int BLINK_NS_HI = 0;
 int cursor_x = 0;
 int cursor_y = 0;
 int serial_tmp = 0;
+char screen_buf[80 * 60];
+int cursor_visible = 1;
+int cursor_drawn = 0;
+int blink_inited = 0;
+int last_blink_lo = 0;
+int last_blink_hi = 0;
+
+int TIME_IO_BASE = 0x2000;
+int REALTIME_LO = 0x14;
+int REALTIME_HI = 0x18;
+
 char font[6080] = {
     0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
     0, 0, 0, 1, 1, 0, 0, 0, 0, 0, 1, 1, 1, 1, 0, 0, 0, 0, 1, 1, 1, 1, 0, 0, 0, 0, 0, 1, 1, 0, 0, 0, 0, 0, 0, 1, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
@@ -114,6 +123,42 @@ char font[6080] = {
     0, 1, 1, 1, 0, 1, 1, 0, 1, 1, 0, 1, 1, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0
 };
 
+typedef struct {
+    int lo;
+    int hi;
+} u64_pair;
+int u32_cmp_unsigned(int a, int b) {
+    if (a < 0 && b >= 0) return 1;
+    if (a >= 0 && b < 0) return -1;
+    if (a < b) return -1;
+    if (a > b) return 1;
+    return 0;
+}
+
+int u64_pair_cmp(u64_pair *a, u64_pair *b) {
+    int hi_cmp = u32_cmp_unsigned(a->hi, b->hi);
+    if (hi_cmp != 0) return hi_cmp;
+    return u32_cmp_unsigned(a->lo, b->lo);
+}
+
+int u32_lt_unsigned(int a, int b) {
+    return u32_cmp_unsigned(a, b) < 0;
+}
+
+int u32_ge_unsigned(int a, int b) {
+    return u32_cmp_unsigned(a, b) >= 0;
+}
+void u64_pair_sub(u64_pair *out, u64_pair *a, u64_pair *b) {
+      out->lo = a->lo - b->lo;
+      int borrow = u32_lt_unsigned(a->lo, b->lo);
+      out->hi = a->hi - b->hi - borrow;
+  }
+
+void read_from_timer(u64_pair *out) {
+    out->lo = *(int *)(TIME_IO_BASE + REALTIME_LO);
+    out->hi = *(int *)(TIME_IO_BASE + REALTIME_HI);
+}
+
 int serial_status() {
     asm("movi r1, SERIAL_STATUS\nload32 r1, [r1]\nin r0, [r1]\nmovi r2, serial_tmp\nstore32 [r2], r0\n");
     return serial_tmp;
@@ -203,40 +248,182 @@ int draw_char(int ch, int cx, int cy) {
     return 0;
 }
 
-int newline() {
-    cursor_x = 0;
-    cursor_y = cursor_y + 1;
-    if (cursor_y >= ROWS) {
-        clear_screen();
-        cursor_y = 0;
+int redraw_cell_from_buf(int cx, int cy) {
+    int idx = cy * COLS + cx;
+    int ch = screen_buf[idx];
+    if (ch == 0) {
+        clear_cell(cx,cy);
+    } else {
+        draw_char(ch,cx,cy);
     }
     return 0;
 }
 
+int draw_cursor_underline(int cx,int cy) {
+    int *fb = (int *)0x400000;
+    int py = cy * 8;
+    int px = cx * 8;
+    int x = 0;
+    while (x < 8) {
+        fb[(py+7) * 640 + (px+x)] = COLOR_ON;
+        x = x + 1;
+    }
+    return 0;
+}
+int cursor_erase_if_drawn() {
+    if (cursor_drawn) {
+        redraw_cell_from_buf(cursor_x, cursor_y);
+        cursor_drawn = 0;
+    }
+    return 0;
+}
+
+int cursor_draw_if_needed() {
+    if (cursor_visible) {
+        redraw_cell_from_buf(cursor_x, cursor_y);
+        draw_cursor_underline(cursor_x, cursor_y);
+        cursor_drawn = 1;
+    } else {
+        cursor_drawn = 0;
+    }
+    return 0;
+}
+
+int cursor_set(int nx, int ny) {
+    cursor_erase_if_drawn();
+    cursor_x = nx;
+    cursor_y = ny;
+    cursor_draw_if_needed();
+    return 0;
+}
+
+int newline() {
+    int nx = 0;
+    int ny = cursor_y + 1;
+    if (ny >= ROWS) {
+        clear_screen();
+        int i = 0;
+        while (i < COLS * ROWS) {
+            screen_buf[i] = 0;
+            i = i + 1;
+        }
+        ny = 0;
+    }
+    cursor_set(nx, ny);
+    return 0;
+}
+int put_char_at_cursor(int ch) {
+    cursor_erase_if_drawn();
+
+    if (ch < 32 || ch > 126) {
+        screen_buf[cursor_y * COLS + cursor_x] = 0;
+        draw_box(cursor_x, cursor_y);
+    } else {
+        screen_buf[cursor_y * COLS + cursor_x] = (char)ch;
+        draw_char(ch, cursor_x, cursor_y);
+    }
+
+    int nx = cursor_x + 1;
+    int ny = cursor_y;
+    if (nx >= COLS) {
+        nx = 0;
+        ny = ny + 1;
+        if (ny >= ROWS) {
+            clear_screen();
+            int i = 0;
+            while (i < COLS * ROWS) {
+                screen_buf[i] = 0;
+                i = i + 1;
+            }
+            ny = 0;
+        }
+    }
+    cursor_x = nx;
+    cursor_y = ny;
+
+
+    cursor_draw_if_needed();
+    return 0;
+}
+int backspace() {
+    cursor_erase_if_drawn();
+
+    int nx = cursor_x;
+    int ny = cursor_y;
+
+    if (nx > 0) {
+        nx = nx - 1;
+    } else if (ny > 0) {
+        ny = ny - 1;
+        nx = COLS - 1;
+    }
+
+    cursor_x = nx;
+    cursor_y = ny;
+
+    screen_buf[cursor_y * COLS + cursor_x] = 0;
+    clear_cell(cursor_x, cursor_y);
+
+    cursor_draw_if_needed();
+    return 0;
+}
+int cursor_blink_tick() {
+    u64_pair now;
+    u64_pair last;
+    u64_pair delta;
+    u64_pair period;
+
+    read_from_timer(&now);
+    if (!blink_inited) {
+        last_blink_lo = now.lo;
+        last_blink_hi = now.hi;
+        blink_inited = 1;
+        return 0;
+    }
+    last.lo = last_blink_lo;
+    last.hi = last_blink_hi;
+    u64_pair_sub(&delta, &now, &last);
+    period.lo = BLINK_NS_LO;
+    period.hi = BLINK_NS_HI;
+
+    if (u64_pair_cmp(&delta, &period) >= 0) {
+        last_blink_lo = now.lo;
+        last_blink_hi = now.hi;
+        cursor_visible = 1 - cursor_visible;
+
+        if (cursor_visible) {
+            cursor_draw_if_needed();
+        } else {
+            cursor_erase_if_drawn();
+        }
+    }
+    return 0;
+}
 int main() {
     clear_screen();
+    int i = 0;
+    while (i < COLS * ROWS) {
+        screen_buf[i] = 0;
+        i = i + 1;
+    }
+    cursor_visible = 1;
+    cursor_draw_if_needed();
+
     while (1) {
+        cursor_blink_tick();
+
         int s = serial_status();
         if (s == 1 || s == 3) {
             int ch = serial_read();
+
             if (ch == 10) {
                 newline();
             } else if (ch == 8) {
-                if (cursor_x > 0) {
-                    cursor_x = cursor_x - 1;
-                } else if (cursor_y > 0) {
-                    cursor_y = cursor_y - 1;
-                    cursor_x = COLS - 1;
-                }
-                clear_cell(cursor_x, cursor_y);
+                backspace();
             } else if (ch == 13) {
-                cursor_x = 0;
+                cursor_set(0, cursor_y);
             } else {
-                draw_char(ch, cursor_x, cursor_y);
-                cursor_x = cursor_x + 1;
-                if (cursor_x >= COLS) {
-                    newline();
-                }
+                put_char_at_cursor(ch);
             }
         }
     }
