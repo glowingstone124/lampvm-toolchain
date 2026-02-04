@@ -16,6 +16,8 @@ enum Section {
     Bss,
 }
 
+const INST_SIZE: u32 = 8;
+
 #[derive(Clone, Copy, Debug)]
 struct LabelRef {
     section: Section,
@@ -81,6 +83,105 @@ fn parse_symbol_list(args: &str) -> Vec<String> {
         .filter(|s| !s.is_empty())
         .map(|s| s.to_string())
         .collect()
+}
+
+fn align_up_u32(v: u32, align: u32) -> u32 {
+    if align <= 1 {
+        return v;
+    }
+    let rem = v % align;
+    if rem == 0 {
+        v
+    } else {
+        v + (align - rem)
+    }
+}
+
+fn section_from_name(name: &str) -> Option<Section> {
+    if name == ".text" || name.starts_with(".text.") {
+        Some(Section::Text)
+    } else if name == ".data" || name.starts_with(".data.") {
+        Some(Section::Data)
+    } else if name == ".bss" || name.starts_with(".bss.") {
+        Some(Section::Bss)
+    } else if name == ".rodata" || name.starts_with(".rodata.") {
+        Some(Section::Data)
+    } else {
+        None
+    }
+}
+
+fn parse_section_directive(args: &str) -> Section {
+    let section_name = args
+        .split(',')
+        .next()
+        .map(str::trim)
+        .unwrap_or("");
+    section_from_name(section_name).unwrap_or(Section::Data)
+}
+
+fn should_ignore_directive(directive: &str) -> bool {
+    matches!(
+        directive,
+        ".file" | ".loc" | ".ident" | ".type" | ".size"
+    ) || directive.starts_with(".cfi_")
+}
+
+fn parse_alignment_bytes(
+    directive: &str,
+    args: &str,
+    arch: &ArchConfig,
+    labels: &HashMap<String, u32>,
+) -> u32 {
+    match directive {
+        ".p2align" => {
+            let pow = parse_imm(args, arch, labels);
+            if pow >= 32 {
+                panic!("Invalid .p2align exponent: {}", pow);
+            }
+            1u32 << pow
+        }
+        ".align" | ".balign" => parse_imm(args, arch, labels),
+        _ => panic!("Not an alignment directive: {}", directive),
+    }
+}
+
+fn apply_text_alignment_size(offset: &mut u32, align: u32) {
+    if align <= 1 {
+        return;
+    }
+    while *offset % align != 0 {
+        *offset += INST_SIZE;
+    }
+}
+
+fn emit_text_alignment_nops(text: &mut Vec<u64>, offset: &mut u32, align: u32) {
+    if align <= 1 {
+        return;
+    }
+    while *offset % align != 0 {
+        text.push(inst(Opcode::OP_MOV as u8, 0, 0, 0, 0));
+        *offset += INST_SIZE;
+    }
+}
+
+fn parse_common_directive(
+    args: &str,
+    arch: &ArchConfig,
+    labels: &HashMap<String, u32>,
+) -> (String, u32, u32) {
+    let parts = parse_list_args(args);
+    if parts.len() < 2 {
+        panic!("Expected .comm/.lcomm format: sym, size[, align]");
+    }
+    let name = parts[0].clone();
+    let size = parse_imm(&parts[1], arch, labels);
+    let align = if parts.len() >= 3 {
+        parse_imm(&parts[2], arch, labels)
+    } else {
+        1
+    };
+    (name, size, align)
 }
 
 fn parse_string_literal(s: &str) -> Vec<u8> {
@@ -190,12 +291,13 @@ fn emit_data_directive_reloc(
     args: &str,
     arch: &ArchConfig,
     section_offset: u32,
+    labels: &HashMap<String, u32>,
 ) -> u32 {
     let mut written = 0u32;
     match directive {
         ".byte" => {
             for arg in parse_list_args(args) {
-                let (imm, reloc) = parse_imm_reloc(&arg, arch);
+                let (imm, reloc) = parse_imm_reloc(&arg, arch, labels);
                 if let Some(RelocRef { symbol, addend }) = reloc {
                     relocations.push(Relocation {
                         section: ObjSection::Data,
@@ -213,7 +315,7 @@ fn emit_data_directive_reloc(
         }
         ".word" => {
             for arg in parse_list_args(args) {
-                let (imm, reloc) = parse_imm_reloc(&arg, arch);
+                let (imm, reloc) = parse_imm_reloc(&arg, arch, labels);
                 if let Some(RelocRef { symbol, addend }) = reloc {
                     relocations.push(Relocation {
                         section: ObjSection::Data,
@@ -231,7 +333,7 @@ fn emit_data_directive_reloc(
         }
         ".long" => {
             for arg in parse_list_args(args) {
-                let (imm, reloc) = parse_imm_reloc(&arg, arch);
+                let (imm, reloc) = parse_imm_reloc(&arg, arch, labels);
                 if let Some(RelocRef { symbol, addend }) = reloc {
                     relocations.push(Relocation {
                         section: ObjSection::Data,
@@ -300,8 +402,7 @@ fn assemble_lines_to_object(lines: &[String], arch: &ArchConfig) -> ObjectFile {
     let mut bss_size: u32 = 0;
     let mut globals: HashMap<String, bool> = HashMap::new();
     let mut externs: HashMap<String, bool> = HashMap::new();
-
-    const INST_SIZE: u32 = 8;
+    let dummy_labels: HashMap<String, u32> = HashMap::new();
 
     for line in lines {
         let clean = clean_line(line);
@@ -327,7 +428,8 @@ fn assemble_lines_to_object(lines: &[String], arch: &ArchConfig) -> ObjectFile {
                 ".text" => section = Section::Text,
                 ".data" => section = Section::Data,
                 ".bss" => section = Section::Bss,
-                ".global" => {
+                ".section" => section = parse_section_directive(args),
+                ".global" | ".globl" => {
                     for name in parse_symbol_list(args) {
                         globals.insert(name, true);
                     }
@@ -342,7 +444,7 @@ fn assemble_lines_to_object(lines: &[String], arch: &ArchConfig) -> ObjectFile {
                         ".byte" => parse_list_args(args).len() as u32,
                         ".word" => (parse_list_args(args).len() as u32) * 2,
                         ".long" => (parse_list_args(args).len() as u32) * 4,
-                        ".space" | ".zero" => parse_imm(args, arch, &HashMap::new()),
+                        ".space" | ".zero" => parse_imm(args, arch, &dummy_labels),
                         ".ascii" => parse_string_literal(args).len() as u32,
                         ".asciz" => (parse_string_literal(args).len() as u32) + 1,
                         _ => 0,
@@ -358,6 +460,29 @@ fn assemble_lines_to_object(lines: &[String], arch: &ArchConfig) -> ObjectFile {
                         }
                     }
                 }
+                ".align" | ".p2align" | ".balign" => {
+                    let align = parse_alignment_bytes(directive, args, arch, &dummy_labels);
+                    match section {
+                        Section::Text => apply_text_alignment_size(&mut text_size, align),
+                        Section::Data => data_size = align_up_u32(data_size, align),
+                        Section::Bss => bss_size = align_up_u32(bss_size, align),
+                    }
+                }
+                ".comm" | ".lcomm" => {
+                    let (name, size, align) = parse_common_directive(args, arch, &dummy_labels);
+                    bss_size = align_up_u32(bss_size, align);
+                    if label_refs.insert(name.clone(), LabelRef {
+                        section: Section::Bss,
+                        offset: bss_size,
+                    }).is_some() {
+                        panic!("Duplicate label definition: {}", name);
+                    }
+                    if directive == ".comm" {
+                        globals.insert(name, true);
+                    }
+                    bss_size += size;
+                }
+                _ if should_ignore_directive(directive) => {}
                 _ => panic!("Unknown directive {}", directive),
             }
             continue;
@@ -395,6 +520,19 @@ fn assemble_lines_to_object(lines: &[String], arch: &ArchConfig) -> ObjectFile {
     let mut program: Vec<u64> = Vec::new();
     let mut data: Vec<u8> = Vec::new();
     let mut relocations: Vec<Relocation> = Vec::new();
+    let mut text_labels: HashMap<String, u32> = HashMap::new();
+    let mut data_labels: HashMap<String, u32> = HashMap::new();
+    for (name, label_ref) in &label_refs {
+        match label_ref.section {
+            Section::Text => {
+                text_labels.insert(name.clone(), label_ref.offset);
+            }
+            Section::Data => {
+                data_labels.insert(name.clone(), label_ref.offset);
+            }
+            Section::Bss => {}
+        }
+    }
     section = Section::Text;
     let mut text_offset: u32 = 0;
     let mut data_offset: u32 = 0;
@@ -414,7 +552,8 @@ fn assemble_lines_to_object(lines: &[String], arch: &ArchConfig) -> ObjectFile {
                 ".text" => section = Section::Text,
                 ".data" => section = Section::Data,
                 ".bss" => section = Section::Bss,
-                ".global" | ".extern" => {}
+                ".section" => section = parse_section_directive(args),
+                ".global" | ".globl" | ".extern" => {}
                 ".byte" | ".word" | ".long" | ".space" | ".zero" | ".ascii" | ".asciz" => {
                     if section == Section::Data {
                         let written = emit_data_directive_reloc(
@@ -424,6 +563,7 @@ fn assemble_lines_to_object(lines: &[String], arch: &ArchConfig) -> ObjectFile {
                             args,
                             arch,
                             data_offset,
+                            &data_labels,
                         );
                         data_offset += written;
                     } else if section == Section::Bss {
@@ -432,6 +572,21 @@ fn assemble_lines_to_object(lines: &[String], arch: &ArchConfig) -> ObjectFile {
                         panic!("Data directive {} not allowed in .text", directive);
                     }
                 }
+                ".align" | ".p2align" | ".balign" => {
+                    let align = parse_alignment_bytes(directive, args, arch, &dummy_labels);
+                    match section {
+                        Section::Text => emit_text_alignment_nops(&mut program, &mut text_offset, align),
+                        Section::Data => {
+                            let target = align_up_u32(data_offset, align);
+                            let pad = (target - data_offset) as usize;
+                            data.extend(std::iter::repeat(0u8).take(pad));
+                            data_offset = target;
+                        }
+                        Section::Bss => {}
+                    }
+                }
+                ".comm" | ".lcomm" => {}
+                _ if should_ignore_directive(directive) => {}
                 _ => panic!("Unknown directive {}", directive),
             }
             continue;
@@ -452,7 +607,12 @@ fn assemble_lines_to_object(lines: &[String], arch: &ArchConfig) -> ObjectFile {
             .filter(|s| !s.is_empty())
             .collect();
 
-        let (rd, rs1, rs2, imm, reloc) = parse_operands_reloc(opcode.format(), &args, arch);
+        let (rd, rs1, rs2, imm, reloc) = parse_operands_reloc(
+            opcode.format(),
+            &args,
+            arch,
+            &text_labels,
+        );
         if let Some(RelocRef { symbol, addend }) = reloc {
             relocations.push(Relocation {
                 section: ObjSection::Text,
@@ -482,8 +642,6 @@ fn assemble_lines_with_sections(lines: &[String], arch: &ArchConfig) -> Assemble
     let mut data_size: u32 = 0;
     let mut bss_size: u32 = 0;
 
-    const INST_SIZE: u32 = 8;
-
     let text_base = *arch.macros.get("PROGRAM_BASE").expect("No PROGRAM_BASE found");
     let dummy_labels: HashMap<String, u32> = HashMap::new();
 
@@ -510,7 +668,8 @@ fn assemble_lines_with_sections(lines: &[String], arch: &ArchConfig) -> Assemble
                 ".text" => section = Section::Text,
                 ".data" => section = Section::Data,
                 ".bss" => section = Section::Bss,
-                ".global" | ".extern" => {}
+                ".section" => section = parse_section_directive(args),
+                ".global" | ".globl" | ".extern" => {}
                 ".byte" | ".word" | ".long" | ".space" | ".zero" | ".ascii" | ".asciz" => {
                     let size = data_directive_size(directive, args, arch, &dummy_labels);
                     match section {
@@ -524,6 +683,26 @@ fn assemble_lines_with_sections(lines: &[String], arch: &ArchConfig) -> Assemble
                         }
                     }
                 }
+                ".align" | ".p2align" | ".balign" => {
+                    let align = parse_alignment_bytes(directive, args, arch, &dummy_labels);
+                    match section {
+                        Section::Text => apply_text_alignment_size(&mut text_size, align),
+                        Section::Data => data_size = align_up_u32(data_size, align),
+                        Section::Bss => bss_size = align_up_u32(bss_size, align),
+                    }
+                }
+                ".comm" | ".lcomm" => {
+                    let (name, size, align) = parse_common_directive(args, arch, &dummy_labels);
+                    bss_size = align_up_u32(bss_size, align);
+                    if label_refs.insert(name.clone(), LabelRef {
+                        section: Section::Bss,
+                        offset: bss_size,
+                    }).is_some() {
+                        panic!("Duplicate label definition: {}", name);
+                    }
+                    bss_size += size;
+                }
+                _ if should_ignore_directive(directive) => {}
                 _ => panic!("Unknown directive {}", directive),
             }
             continue;
@@ -564,7 +743,8 @@ fn assemble_lines_with_sections(lines: &[String], arch: &ArchConfig) -> Assemble
                 ".text" => section = Section::Text,
                 ".data" => section = Section::Data,
                 ".bss" => section = Section::Bss,
-                ".global" | ".extern" => {}
+                ".section" => section = parse_section_directive(args),
+                ".global" | ".globl" | ".extern" => {}
                 ".byte" | ".word" | ".long" | ".space" | ".zero" | ".ascii" | ".asciz" => {
                     if section == Section::Data {
                         emit_data_directive(&mut data, directive, args, arch, &labels);
@@ -574,6 +754,25 @@ fn assemble_lines_with_sections(lines: &[String], arch: &ArchConfig) -> Assemble
                         panic!("Data directive {} not allowed in .text", directive);
                     }
                 }
+                ".align" | ".p2align" | ".balign" => {
+                    let align = parse_alignment_bytes(directive, args, arch, &dummy_labels);
+                    match section {
+                        Section::Text => {
+                            if align > 1 {
+                                while (program.len() as u32 * INST_SIZE) % align != 0 {
+                                    program.push(inst(Opcode::OP_MOV as u8, 0, 0, 0, 0));
+                                }
+                            }
+                        }
+                        Section::Data => {
+                            let target = align_up_u32(data.len() as u32, align) as usize;
+                            data.resize(target, 0u8);
+                        }
+                        Section::Bss => {}
+                    }
+                }
+                ".comm" | ".lcomm" => {}
+                _ if should_ignore_directive(directive) => {}
                 _ => panic!("Unknown directive {}", directive),
             }
             continue;
@@ -603,4 +802,68 @@ pub fn assemble_file<P: AsRef<Path>>(path: P, arch: &ArchConfig) -> Vec<u64> {
 
 pub fn assemble_string(input: &str, arch: &ArchConfig) -> Vec<u64> {
     assemble_string_with_sections(input, arch).text
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::assemble::config::ArchConfig;
+
+    fn arch() -> ArchConfig {
+        let mut a = ArchConfig::new(32, "r");
+        a.macros.insert("PROGRAM_BASE".to_string(), 0);
+        a
+    }
+
+    fn imm(inst: u64) -> u32 {
+        (inst & 0xFFFF_FFFF) as u32
+    }
+
+    #[test]
+    fn supports_globl_section_and_alignment() {
+        let arch = arch();
+        let asm = r#"
+.section .text
+.globl main
+main:
+    mov r1, r1
+    .p2align 2
+    mov r2, r2
+.section .rodata
+.align 4
+msg:
+    .byte 1
+    .balign 8
+    .byte 2
+"#;
+
+        let out = assemble_string_with_sections(asm, &arch);
+        assert_eq!(out.text.len(), 2);
+        assert_eq!(out.data, vec![1, 0, 0, 0, 0, 0, 0, 0, 2]);
+    }
+
+    #[test]
+    fn supports_common_symbols_and_label_diff() {
+        let arch = arch();
+        let asm = r#"
+.text
+main:
+    movi r1, here - start
+start:
+    mov r0, r0
+here:
+    halt
+.comm g, 3, 4
+.lcomm l, 2, 2
+"#;
+        let out = assemble_string_to_object(asm, &arch);
+        assert_eq!(out.bss_size, 6);
+        let g = out.symbols.iter().find(|s| s.name == "g").unwrap();
+        assert!(g.global);
+        assert_eq!(g.section, Some(ObjSection::Bss));
+        let l = out.symbols.iter().find(|s| s.name == "l").unwrap();
+        assert!(!l.global);
+        assert_eq!(l.section, Some(ObjSection::Bss));
+        assert_eq!(imm(out.text[0]), 8);
+    }
 }

@@ -254,9 +254,13 @@ fn strip_parens(mut s: &str) -> &str {
 pub fn parse_imm_reloc(
     s: &str,
     arch: &ArchConfig,
+    labels: &HashMap<String, u32>,
 ) -> (u32, Option<RelocRef>) {
     let expr = strip_parens(s.trim());
     if let Some(&val) = arch.macros.get(expr) {
+        return (val, None);
+    }
+    if let Some(&val) = labels.get(expr) {
         return (val, None);
     }
     if let Some(hex) = expr.strip_prefix("0x") {
@@ -301,6 +305,8 @@ pub fn parse_imm_reloc(
                 let part_sign = sign;
                 if let Some(&val) = arch.macros.get(part) {
                     addend += part_sign * (val as i64);
+                } else if let Some(&val) = labels.get(part) {
+                    addend += part_sign * (val as i64);
                 } else if let Some(hex) = part.strip_prefix("0x") {
                     let val = u32::from_str_radix(hex, 16).expect("Invalid hex immediate") as i64;
                     addend += part_sign * val;
@@ -332,6 +338,8 @@ pub fn parse_imm_reloc(
     }
     let last = strip_parens(last);
     if let Some(&val) = arch.macros.get(last) {
+        addend += sign * (val as i64);
+    } else if let Some(&val) = labels.get(last) {
         addend += sign * (val as i64);
     } else if let Some(hex) = last.strip_prefix("0x") {
         let val = u32::from_str_radix(hex, 16).expect("Invalid hex immediate") as i64;
@@ -369,6 +377,7 @@ pub fn parse_operands_reloc(
     format: InstFormat,
     args: &[&str],
     arch: &ArchConfig,
+    labels: &HashMap<String, u32>,
 ) -> (u8, u8, u8, u32, Option<RelocRef>) {
     match format {
         InstFormat::None => {
@@ -421,7 +430,7 @@ pub fn parse_operands_reloc(
             if args.len() != 1 {
                 panic!("I format expects imm");
             }
-            let (imm, reloc) = parse_imm_reloc(args[0], arch);
+            let (imm, reloc) = parse_imm_reloc(args[0], arch, labels);
             (0, 0, 0, imm, reloc)
         }
 
@@ -434,7 +443,7 @@ pub fn parse_operands_reloc(
 
         InstFormat::RdRsImm => {
             if args.len() == 3 && !is_mem_token(args[0]) && !is_mem_token(args[1]) {
-                let (imm, reloc) = parse_imm_reloc(args[2], arch);
+                let (imm, reloc) = parse_imm_reloc(args[2], arch, labels);
                 return (
                     parse_reg(args[0], arch),
                     parse_reg(args[1], arch),
@@ -458,7 +467,7 @@ pub fn parse_operands_reloc(
                     panic!("RdRsImm does not allow indexed memory operand");
                 }
                 let (imm, reloc) = if let Some(expr) = imm_expr {
-                    parse_imm_reloc(&expr, arch)
+                    parse_imm_reloc(&expr, arch, labels)
                 } else {
                     (0, None)
                 };
@@ -470,12 +479,12 @@ pub fn parse_operands_reloc(
             if args.len() != 2 {
                 panic!("RdImm expects rd, imm");
             }
-            let (imm, reloc) = parse_imm_reloc(args[1], arch);
+            let (imm, reloc) = parse_imm_reloc(args[1], arch, labels);
             (parse_reg(args[0], arch), 0, 0, imm, reloc)
         }
         InstFormat::RdRsRsImm => {
             if args.len() == 4 && !is_mem_token(args[0]) && !is_mem_token(args[1]) {
-                let (imm, reloc) = parse_imm_reloc(args[3], arch);
+                let (imm, reloc) = parse_imm_reloc(args[3], arch, labels);
                 return (
                     parse_reg(args[0], arch),
                     parse_reg(args[1], arch),
@@ -497,7 +506,7 @@ pub fn parse_operands_reloc(
                 let (rs1, rs2, imm_expr) = parse_mem_operand(mem_str, arch);
                 let rs2 = rs2.expect("RdRsRsImm expects indexed memory operand");
                 let (imm, reloc) = if let Some(expr) = imm_expr {
-                    parse_imm_reloc(&expr, arch)
+                    parse_imm_reloc(&expr, arch, labels)
                 } else {
                     (0, None)
                 };
@@ -657,5 +666,16 @@ mod tests {
         assert_eq!(rs1, 2);
         assert_eq!(rs2, 0);
         assert_eq!(imm, 8);
+    }
+
+    #[test]
+    fn parse_imm_reloc_supports_symbol_minus_symbol_with_known_labels() {
+        let arch = arch();
+        let mut labels = HashMap::new();
+        labels.insert("a".to_string(), 20);
+        labels.insert("b".to_string(), 12);
+        let (imm, reloc) = parse_imm_reloc("a-b+4", &arch, &labels);
+        assert_eq!(imm, 12);
+        assert!(reloc.is_none());
     }
 }
