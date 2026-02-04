@@ -1,6 +1,6 @@
 # lampvm-toolchain
 
-Currently aligned VM version: [5d3ddf09e0a8315dc4838efa44cd7861e65f9976](https://github.com/glowingstone124/lamp-vm/commit/5d3ddf09e0a8315dc4838efa44cd7861e65f9976)
+Currently aligned VM version: [1a4289b54d3e1dd5af290133e06df394673eb5ab](https://github.com/glowingstone124/lamp-vm/commit/1a4289b54d3e1dd5af290133e06df394673eb5ab)
 
 This is the development toolchain for [lampvm](https://github.com/glowingstone124/lamp-vm).
 

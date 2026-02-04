@@ -1705,7 +1705,7 @@ impl<'a> Codegen<'a> {
         }
         if size.is_power_of_two() {
             let shift = size.trailing_zeros();
-            self.emit(format!("shl {}, {}, {}", reg, reg, shift));
+            self.emit(format!("shli {}, {}, {}", reg, reg, shift));
         } else {
             self.emit(format!("movi r2, {}", size));
             self.emit(format!("mul {}, {}, r2", reg, reg));

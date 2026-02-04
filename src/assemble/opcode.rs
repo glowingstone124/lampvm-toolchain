@@ -58,7 +58,14 @@ pub enum Opcode {
     OP_FTOI,
     OP_FLOAD32,
     OP_FSTORE32,
-    OP_INC
+    OP_INC,
+    OP_ADDI,
+    OP_SUBI,
+    OP_ANDI,
+    OP_ORI,
+    OP_XORI,
+    OP_SHLI,
+    OP_SHRI,
 }
 impl Opcode {
     pub fn parse(s: &str) -> Option<Self> {
@@ -118,6 +125,13 @@ impl Opcode {
             "FLOAD32" => Some(Opcode::OP_FLOAD32),
             "FSTORE32" => Some(Opcode::OP_FSTORE32),
             "INC" => Some(Opcode::OP_INC),
+            "ADDI" => Some(Opcode::OP_ADDI),
+            "SUBI" => Some(Opcode::OP_SUBI),
+            "ANDI" => Some(Opcode::OP_ANDI),
+            "ORI" => Some(Opcode::OP_ORI),
+            "XORI" => Some(Opcode::OP_XORI),
+            "SHLI" => Some(Opcode::OP_SHLI),
+            "SHRI" => Some(Opcode::OP_SHRI),
             _ => None,
         }
     }
@@ -132,6 +146,9 @@ impl Opcode {
             | Opcode::OP_AND
             | Opcode::OP_OR
             | Opcode::OP_XOR
+            | Opcode::OP_SHL
+            | Opcode::OP_SHR
+            | Opcode::OP_SAR
             | Opcode::OP_FADD
             | Opcode::OP_FSUB
             | Opcode::OP_FMUL
@@ -151,16 +168,21 @@ impl Opcode {
                 InstFormat::RdRs
             }
 
-            Opcode::OP_SHL
-            | Opcode::OP_SHR
-            | Opcode::OP_LOAD
+            Opcode::OP_LOAD
             | Opcode::OP_LOAD32
             | Opcode::OP_STORE32
             | Opcode::OP_STORE
             | Opcode::OP_MEMSET
             | Opcode::OP_MEMCPY
             | Opcode::OP_FLOAD32
-            | Opcode::OP_FSTORE32 => InstFormat::RdRsImm,
+            | Opcode::OP_FSTORE32
+            | Opcode::OP_ADDI
+            | Opcode::OP_SUBI
+            | Opcode::OP_ANDI
+            | Opcode::OP_ORI
+            | Opcode::OP_XORI
+            | Opcode::OP_SHLI
+            | Opcode::OP_SHRI => InstFormat::RdRsImm,
 
             Opcode::OP_JMP
             | Opcode::OP_JZ
