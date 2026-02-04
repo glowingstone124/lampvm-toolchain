@@ -326,6 +326,25 @@ struct Codegen<'a> {
     string_map: HashMap<String, String>,
     break_stack: Vec<String>,
     continue_stack: Vec<String>,
+    curr_sret_offset: Option<i32>,
+    curr_temp_base: Option<i32>,
+    curr_temp_slot_size: usize,
+    curr_temp_slot_count: usize,
+    curr_temp_slot_index: usize,
+}
+
+struct FrameLayout {
+    frame_size: i32,
+    sret_offset: Option<i32>,
+    temp_base: Option<i32>,
+    temp_slot_size: usize,
+    temp_slot_count: usize,
+}
+
+enum SRetTarget<'a> {
+    Offset(i32),
+    Reg(&'a str),
+    LoadOffset(i32),
 }
 
 impl<'a> Codegen<'a> {
@@ -346,6 +365,11 @@ impl<'a> Codegen<'a> {
             string_map: HashMap::new(),
             break_stack: Vec::new(),
             continue_stack: Vec::new(),
+            curr_sret_offset: None,
+            curr_temp_base: None,
+            curr_temp_slot_size: 0,
+            curr_temp_slot_count: 0,
+            curr_temp_slot_index: 0,
         }
     }
 
@@ -629,32 +653,63 @@ impl<'a> Codegen<'a> {
     }
 
     fn gen_function(&mut self, func: &Function) {
+        let layout = self.compute_frame_layout(func);
+        self.curr_sret_offset = layout.sret_offset;
+        self.curr_temp_base = layout.temp_base;
+        self.curr_temp_slot_size = layout.temp_slot_size;
+        self.curr_temp_slot_count = layout.temp_slot_count;
+        self.curr_temp_slot_index = 0;
+
         let ret_label = self.new_label("Lret");
         self.emit(format!("{}:", func.name));
 
-        let frame_size = self.frame_size(func);
+        let frame_size = layout.frame_size;
 
         self.emit("mov r9, r30"); // r9 old sp
         self.emit(format!("movi r8, {}", frame_size)); // r8 framesize
         self.emit("sub r30, r30, r8");
         self.emit("store32 [r30+0], r9"); // save old sp
 
-        for (i, &param_id) in func.params.iter().enumerate() {
-            if i >= 8 {
-                panic!("More than 8 parameters not supported");
+        let ret_struct = matches!(func.ret_type, Type::Struct(_));
+        let arg_base = if ret_struct { 1 } else { 0 };
+        if ret_struct {
+            if let Some(sret_offset) = self.curr_sret_offset {
+                self.emit(format!("store32 [r30 + {}], r0", sret_offset));
             }
+        }
+
+        for (i, &param_id) in func.params.iter().enumerate() {
             let offset = func.locals[param_id].offset;
             let ty = &func.locals[param_id].ty;
-            if Self::is_char_type(ty) {
-                self.emit(format!("store [r30 + {}], r{}", offset, i));
+            let arg_index = i + arg_base;
+            if arg_index < 8 {
+                if matches!(ty, Type::Struct(_)) {
+                    self.emit(format!("movi r1, {}", offset));
+                    self.emit("add r1, r30, r1");
+                    self.emit(format!("memcpy r1, r{}, {}", arg_index, ty.size_with(self.struct_defs)));
+                } else if Self::is_char_type(ty) {
+                    self.emit(format!("store [r30 + {}], r{}", offset, arg_index));
+                } else {
+                    self.emit(format!("store32 [r30 + {}], r{}", offset, arg_index));
+                }
             } else {
-                self.emit(format!("store32 [r30 + {}], r{}", offset, i));
+                let stack_off = ((arg_index - 8) * 4) as i32;
+                self.emit(format!("load32 r0, [r9 + {}]", stack_off));
+                if matches!(ty, Type::Struct(_)) {
+                    self.emit(format!("movi r1, {}", offset));
+                    self.emit("add r1, r30, r1");
+                    self.emit(format!("memcpy r1, r0, {}", ty.size_with(self.struct_defs)));
+                } else if Self::is_char_type(ty) {
+                    self.emit(format!("store [r30 + {}], r0", offset));
+                } else {
+                    self.emit(format!("store32 [r30 + {}], r0", offset));
+                }
             }
         }
 
         self.gen_stmt(&func.body, func, &ret_label);
 
-        if func.ret_type != Type::Void {
+        if func.ret_type != Type::Void && !ret_struct {
             self.emit("movi r0, 0");
         }
 
@@ -676,6 +731,277 @@ impl<'a> Codegen<'a> {
         align_up(max, 4)
     }
 
+    fn max_struct_size_align(&self) -> (usize, usize) {
+        let mut max_size = 0usize;
+        let mut max_align = 1usize;
+        for def in self.struct_defs.values() {
+            if def.size > max_size {
+                max_size = def.size;
+            }
+            if def.align > max_align {
+                max_align = def.align;
+            }
+        }
+        (max_size, max_align)
+    }
+
+    fn count_struct_call_temps_in_expr(&self, expr: &Expr, func: &Function) -> usize {
+        match &expr.kind {
+            ExprKind::Call { name, args } => {
+                let mut count = 0usize;
+                if let Some(Type::Struct(_)) = self.func_types.get(name) {
+                    count += 1;
+                }
+                for a in args {
+                    count += self.count_struct_call_temps_in_expr(a, func);
+                }
+                count
+            }
+            ExprKind::Binary { lhs, rhs, .. } => {
+                self.count_struct_call_temps_in_expr(lhs, func)
+                    + self.count_struct_call_temps_in_expr(rhs, func)
+            }
+            ExprKind::Unary { expr, .. } => self.count_struct_call_temps_in_expr(expr, func),
+            ExprKind::Assign(lhs, rhs) => {
+                self.count_struct_call_temps_in_expr(lhs, func)
+                    + self.count_struct_call_temps_in_expr(rhs, func)
+            }
+            ExprKind::Index { base, index } => {
+                self.count_struct_call_temps_in_expr(base, func)
+                    + self.count_struct_call_temps_in_expr(index, func)
+            }
+            ExprKind::Member { base, .. } => self.count_struct_call_temps_in_expr(base, func),
+            ExprKind::Conditional { cond, then_expr, else_expr } => {
+                self.count_struct_call_temps_in_expr(cond, func)
+                    + self.count_struct_call_temps_in_expr(then_expr, func)
+                    + self.count_struct_call_temps_in_expr(else_expr, func)
+            }
+            _ => 0,
+        }
+    }
+
+    fn count_struct_call_temps_in_stmt(&self, stmt: &Stmt, func: &Function) -> usize {
+        match stmt {
+            Stmt::InlineAsm(_) => 0,
+            Stmt::Return(Some(e)) => self.count_struct_call_temps_in_expr(e, func),
+            Stmt::Return(None) => 0,
+            Stmt::If { cond, then_branch, else_branch } => {
+                let mut c = self.count_struct_call_temps_in_expr(cond, func);
+                c += self.count_struct_call_temps_in_stmt(then_branch, func);
+                if let Some(e) = else_branch {
+                    c += self.count_struct_call_temps_in_stmt(e, func);
+                }
+                c
+            }
+            Stmt::While { cond, body } => {
+                self.count_struct_call_temps_in_expr(cond, func)
+                    + self.count_struct_call_temps_in_stmt(body, func)
+            }
+            Stmt::For { init, cond, step, body } => {
+                let mut c = 0usize;
+                if let Some(init) = init {
+                    match init {
+                        ForInit::Decl(vars) => {
+                            for (_, init_expr) in vars {
+                                if let Some(e) = init_expr {
+                                    c += self.count_struct_call_temps_in_expr(e, func);
+                                }
+                            }
+                        }
+                        ForInit::Expr(e) => c += self.count_struct_call_temps_in_expr(e, func),
+                    }
+                }
+                if let Some(e) = cond {
+                    c += self.count_struct_call_temps_in_expr(e, func);
+                }
+                if let Some(e) = step {
+                    c += self.count_struct_call_temps_in_expr(e, func);
+                }
+                c + self.count_struct_call_temps_in_stmt(body, func)
+            }
+            Stmt::Switch { expr, items } => {
+                let mut c = self.count_struct_call_temps_in_expr(expr, func);
+                for item in items {
+                    if let SwitchItem::Stmt(s) = item {
+                        c += self.count_struct_call_temps_in_stmt(s, func);
+                    }
+                }
+                c
+            }
+            Stmt::Block(stmts) => stmts.iter().map(|s| self.count_struct_call_temps_in_stmt(s, func)).sum(),
+            Stmt::Decl(vars) => {
+                let mut c = 0usize;
+                for (_, init) in vars {
+                    if let Some(e) = init {
+                        c += self.count_struct_call_temps_in_expr(e, func);
+                    }
+                }
+                c
+            }
+            Stmt::ExprStmt(Some(e)) => self.count_struct_call_temps_in_expr(e, func),
+            Stmt::ExprStmt(None) => 0,
+            Stmt::Break | Stmt::Continue => 0,
+        }
+    }
+
+    fn compute_frame_layout(&self, func: &Function) -> FrameLayout {
+        let mut max = 4i32;
+        for var in &func.locals {
+            let end = var.offset + var.ty.size_with(self.struct_defs) as i32;
+            if end > max {
+                max = end;
+            }
+        }
+        let mut offset = align_up(max, 4);
+        let ret_struct = matches!(func.ret_type, Type::Struct(_));
+        let mut sret_offset = None;
+        if ret_struct {
+            sret_offset = Some(offset);
+            offset += 4;
+        }
+        let temp_count = self.count_struct_call_temps_in_stmt(&func.body, func);
+        let mut temp_base = None;
+        let mut temp_slot_size = 0usize;
+        if temp_count > 0 {
+            let (max_size, max_align) = self.max_struct_size_align();
+            if max_size > 0 {
+                let align = if max_align == 0 { 1 } else { max_align as i32 };
+                offset = align_up(offset, align);
+                temp_base = Some(offset);
+                let slot_size = align_up(max_size as i32, align) as usize;
+                temp_slot_size = slot_size;
+                offset += (slot_size * temp_count) as i32;
+            }
+        }
+        let frame_size = align_up(offset, 4);
+        FrameLayout {
+            frame_size,
+            sret_offset,
+            temp_base,
+            temp_slot_size,
+            temp_slot_count: temp_count,
+        }
+    }
+
+    fn alloc_struct_temp(&mut self) -> i32 {
+        let base = self.curr_temp_base.unwrap_or_else(|| {
+            panic!("Struct temporary needed but no temp slots allocated");
+        });
+        if self.curr_temp_slot_index >= self.curr_temp_slot_count {
+            panic!("Struct temporary slots exhausted");
+        }
+        let offset = base + (self.curr_temp_slot_index as i32 * self.curr_temp_slot_size as i32);
+        self.curr_temp_slot_index += 1;
+        offset
+    }
+
+    fn is_lvalue_expr(expr: &Expr) -> bool {
+        matches!(
+            expr.kind,
+            ExprKind::Var(_)
+                | ExprKind::GlobalVar(_)
+                | ExprKind::Member { .. }
+                | ExprKind::Index { .. }
+                | ExprKind::Unary { op: UnOp::Deref, .. }
+        )
+    }
+
+    fn gen_struct_addr(&mut self, expr: &Expr, func: &Function) {
+        match &expr.kind {
+            ExprKind::Call { name, args } => {
+                let temp_off = self.alloc_struct_temp();
+                self.gen_call(name, args, func, Some(SRetTarget::Offset(temp_off)));
+                self.emit(format!("movi r0, {}", temp_off));
+                self.emit("add r0, r30, r0");
+            }
+            _ => {
+                if !Self::is_lvalue_expr(expr) {
+                    panic!("Struct value must be an lvalue or a struct-returning call");
+                }
+                self.gen_lvalue(expr, func);
+            }
+        }
+    }
+
+    fn gen_call(&mut self, name: &str, args: &[Expr], func: &Function, sret: Option<SRetTarget>) {
+        let mut total_args = args.len();
+        if sret.is_some() {
+            total_args += 1;
+        }
+        let reg_count = if total_args > 8 { 8 } else { total_args };
+        let stack_args = total_args.saturating_sub(8);
+
+        for arg in args.iter().rev() {
+            let aty = self.expr_type(arg, func);
+            if matches!(aty, Type::Struct(_)) {
+                self.gen_struct_addr(arg, func);
+            } else {
+                self.gen_expr(arg, func);
+            }
+            self.emit("push r0");
+        }
+        if let Some(target) = sret {
+            match target {
+                SRetTarget::Offset(off) => {
+                    self.emit(format!("movi r0, {}", off));
+                    self.emit("add r0, r30, r0");
+                    self.emit("push r0");
+                }
+                SRetTarget::Reg(reg) => {
+                    if reg != "r0" {
+                        self.emit(format!("mov r0, {}", reg));
+                    }
+                    self.emit("push r0");
+                }
+                SRetTarget::LoadOffset(off) => {
+                    self.emit(format!("load32 r0, [r30 + {}]", off));
+                    self.emit("push r0");
+                }
+            }
+        }
+
+        for i in 0..reg_count {
+            self.emit(format!("pop r{}", i));
+        }
+
+        self.emit(format!("call {}", name));
+
+        if stack_args > 0 {
+            self.emit(format!("movi r1, {}", (stack_args * 4) as i32));
+            self.emit("add r30, r30, r1");
+        }
+    }
+
+    fn gen_call_with_sret_lvalue(&mut self, name: &str, args: &[Expr], func: &Function, sret_expr: &Expr) {
+        let total_args = args.len() + 1;
+        let reg_count = if total_args > 8 { 8 } else { total_args };
+        let stack_args = total_args.saturating_sub(8);
+
+        for arg in args.iter().rev() {
+            let aty = self.expr_type(arg, func);
+            if matches!(aty, Type::Struct(_)) {
+                self.gen_struct_addr(arg, func);
+            } else {
+                self.gen_expr(arg, func);
+            }
+            self.emit("push r0");
+        }
+
+        self.gen_lvalue(sret_expr, func);
+        self.emit("push r0");
+
+        for i in 0..reg_count {
+            self.emit(format!("pop r{}", i));
+        }
+
+        self.emit(format!("call {}", name));
+
+        if stack_args > 0 {
+            self.emit(format!("movi r1, {}", (stack_args * 4) as i32));
+            self.emit("add r30, r30, r1");
+        }
+    }
+
     fn gen_stmt(&mut self, stmt: &Stmt, func: &Function, ret_label: &str) {
         match stmt {
             Stmt::InlineAsm(s) => {
@@ -687,9 +1013,25 @@ impl<'a> Codegen<'a> {
             }
             Stmt::Return(expr) => {
                 if let Some(e) = expr {
-                    self.gen_expr(e, func);
-                    let rty = self.expr_type(e, func);
-                    self.cast_reg(&rty, &func.ret_type);
+                    if matches!(func.ret_type, Type::Struct(_)) {
+                        let sret_offset = self.curr_sret_offset.unwrap_or_else(|| {
+                            panic!("Missing sret slot for struct return");
+                        });
+                        if let ExprKind::Call { name, args } = &e.kind {
+                            self.gen_call(name, args, func, Some(SRetTarget::LoadOffset(sret_offset)));
+                        } else {
+                            self.emit(format!("load32 r1, [r30 + {}]", sret_offset));
+                            self.gen_struct_addr(e, func);
+                            self.emit(format!(
+                                "memcpy r1, r0, {}",
+                                func.ret_type.size_with(self.struct_defs)
+                            ));
+                        }
+                    } else {
+                        self.gen_expr(e, func);
+                        let rty = self.expr_type(e, func);
+                        self.cast_reg(&rty, &func.ret_type);
+                    }
                 }
                 self.emit(format!("jmp {}", ret_label));
             }
@@ -864,6 +1206,17 @@ impl<'a> Codegen<'a> {
                                 continue;
                             }
                         }
+                        if matches!(lty, Type::Struct(_)) {
+                            self.gen_lvalue(&Expr { kind: ExprKind::Var(*id) }, func);
+                            self.emit("push r0");
+                            self.gen_struct_addr(expr, func);
+                            self.emit("pop r1");
+                            self.emit(format!(
+                                "memcpy r1, r0, {}",
+                                lty.size_with(self.struct_defs)
+                            ));
+                            continue;
+                        }
                         self.gen_expr(expr, func);
                         let rty = self.expr_type(expr, func);
                         self.cast_reg(&rty, lty);
@@ -931,21 +1284,38 @@ impl<'a> Codegen<'a> {
                 }
             }
             ExprKind::Assign(lhs, rhs) => {
-                self.gen_lvalue(lhs, func);
-                self.emit("push r0");
-                self.gen_expr(rhs, func);
-                self.emit("pop r1");
-                if let Some(lty) = self.lvalue_type(lhs, func) {
+                let lty_opt = self.lvalue_type(lhs, func);
+                if let Some(lty) = &lty_opt {
                     if lty.is_array() {
                         panic!("Cannot assign to array");
                     }
                     if matches!(lty, Type::Struct(_)) {
-                        panic!("Cannot assign struct values");
+                        if let ExprKind::Call { name, args } = &rhs.kind {
+                            self.gen_call_with_sret_lvalue(name, args, func, lhs);
+                            self.emit("movi r0, 0");
+                            return;
+                        }
                     }
+                }
+                self.gen_lvalue(lhs, func);
+                self.emit("push r0");
+                if let Some(lty) = &lty_opt {
+                    if matches!(lty, Type::Struct(_)) {
+                        self.emit("pop r1");
+                        self.gen_struct_addr(rhs, func);
+                        self.emit(format!(
+                            "memcpy r1, r0, {}",
+                            lty.size_with(self.struct_defs)
+                        ));
+                        self.emit("movi r0, 0");
+                        return;
+                    }
+                }
+                self.gen_expr(rhs, func);
+                self.emit("pop r1");
+                if let Some(lty) = lty_opt {
                     let rty = self.expr_type(rhs, func);
                     self.cast_reg(&rty, &lty);
-                }
-                if let Some(lty) = self.lvalue_type(lhs, func) {
                     self.emit_store_to_addr(&lty, "r1");
                 } else {
                     self.emit("store32 [r1], r0");
@@ -957,6 +1327,9 @@ impl<'a> Codegen<'a> {
             ExprKind::Member { .. } => {
                 self.gen_lvalue(expr, func);
                 let rty = self.expr_type(expr, func);
+                if matches!(rty, Type::Struct(_)) {
+                    panic!("Struct values cannot be used directly; access fields instead");
+                }
                 self.emit_load_from_addr(&rty, "r0");
             }
             ExprKind::Binary { op, lhs, rhs } => {
@@ -971,21 +1344,21 @@ impl<'a> Codegen<'a> {
                     self.emit("movi r0, 0");
                     return;
                 }
-                if args.len() > 8 {
-                    panic!("More than 8 arguments not supported");
+                let ret_ty = self.func_types.get(name).cloned().unwrap_or(Type::Int);
+                if matches!(ret_ty, Type::Struct(_)) {
+                    let temp_off = self.alloc_struct_temp();
+                    self.gen_call(name, args, func, Some(SRetTarget::Offset(temp_off)));
+                    self.emit("movi r0, 0");
+                } else {
+                    self.gen_call(name, args, func, None);
                 }
-                for arg in args {
-                    self.gen_expr(arg, func);
-                    self.emit("push r0");
-                }
-                for i in (0..args.len()).rev() {
-                    self.emit(format!("pop r{}", i));
-                }
-                self.emit(format!("call {}", name));
             }
             ExprKind::Index { .. } => {
                 self.gen_lvalue(expr, func);
                 let rty = self.expr_type(expr, func);
+                if matches!(rty, Type::Struct(_)) {
+                    panic!("Struct values cannot be used directly; access fields instead");
+                }
                 if !rty.is_array() {
                     self.emit_load_from_addr(&rty, "r0");
                 }
@@ -1706,6 +2079,30 @@ mod tests {
         let asm = compile_ok("typedef struct { int a; char b; } Foo; int main(){Foo f; f.a=1; f.b=2; return f.a;}");
         assert!(asm.contains("store32"));
         assert!(asm.contains("store ["));
+    }
+
+    #[test]
+    fn compile_struct_assign_and_return() {
+        let asm = compile_ok("typedef struct { int a; int b; } P; int main(){P a; P b; a.a=1; a.b=2; b=a; return b.a;}");
+        assert!(asm.contains("memcpy"));
+    }
+
+    #[test]
+    fn compile_struct_param_and_return() {
+        let asm = compile_ok("typedef struct { int a; int b; } P; P make(int x){P t; t.a=x; t.b=x+1; return t;} int sum(P p){return p.a+p.b;} int main(){P v=make(3); return sum(v);}");
+        assert!(asm.contains("memcpy"));
+    }
+
+    #[test]
+    fn compile_struct_nested_and_array() {
+        let _asm = compile_ok("typedef struct { int a; int b; } P; typedef struct { P p; int c; } Q; int main(){Q q; P arr[2]; q.p.a=1; q.c=2; arr[0].b=3; return q.p.a+q.c+arr[0].b;}");
+    }
+
+    #[test]
+    fn compile_many_params() {
+        let asm = compile_ok("int foo(int a0,int a1,int a2,int a3,int a4,int a5,int a6,int a7,int a8,int a9){return a9;} int main(){return foo(0,1,2,3,4,5,6,7,8,9);}");
+        assert!(asm.contains("load32 r0, [r9 + 0]"));
+        assert!(asm.contains("load32 r0, [r9 + 4]"));
     }
 
     #[test]

@@ -185,6 +185,18 @@ Not supported: comma operator in expressions, `%`, bitwise ops, `--`, `sizeof`, 
 - Comparisons and logical operators yield `0` or `1`.
 - `&&` and `||` are short‑circuiting.
 
+### 3.7 ABI and Calling Convention
+- **Integer/ptr/float/char return**: returned in `r0`. If a non‑void function reaches the end, it returns `0`.
+- **Struct return (sret)**: a hidden first argument is passed as a pointer to the return storage.
+  - The callee writes the struct result to `*r0` and does not return it in registers.
+  - User‑visible arguments are shifted by one register/stack slot when the return type is a struct.
+- **Argument registers**: the first 8 arguments are passed in `r0..r7`.
+- **Stack arguments**: arguments beyond 8 are passed on the caller stack; the callee reads them at
+  `[r9 + 0]`, `[r9 + 4]`, ... where `r9` is the caller stack pointer saved in the prologue.
+- **Struct parameters (by value)**: the caller passes the address of the source object as the argument,
+  and the callee copies it into its local parameter slot using `MEMCPY` (true by‑value semantics).
+- **Struct comparison**: not supported (`==`/`!=` for struct values are invalid).
+
 ## 4. Diagnostics
 
 Errors are raised via `panic!` with simple messages, e.g.
