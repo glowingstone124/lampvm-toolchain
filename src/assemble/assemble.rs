@@ -34,14 +34,41 @@ pub struct AssembledProgram {
 }
 
 fn clean_line(line: &str) -> &str {
-    line.split(';').next().unwrap_or("").trim()
+    let mut in_string = false;
+    let mut escaped = false;
+    let mut end = line.len();
+    for (i, ch) in line.char_indices() {
+        if in_string {
+            if escaped {
+                escaped = false;
+                continue;
+            }
+            if ch == '\\' {
+                escaped = true;
+            } else if ch == '"' {
+                in_string = false;
+            }
+            continue;
+        }
+        if ch == '"' {
+            in_string = true;
+            continue;
+        }
+        if ch == ';' || ch == '#' {
+            end = i;
+            break;
+        }
+    }
+    line[..end].trim()
 }
 fn split_label(line: &str) -> (Option<&str>, &str) {
-    if let Some((label, rest)) = line.split_once(':') {
-        (Some(label.trim()), rest.trim())
-    } else {
-        (None, line)
+    let first_ws = line.find(char::is_whitespace).unwrap_or(line.len());
+    if let Some(colon_idx) = line.find(':') {
+        if colon_idx < first_ws {
+            return (Some(line[..colon_idx].trim()), line[colon_idx + 1..].trim());
+        }
     }
+    (None, line)
 }
 pub fn assemble_line(
     line: &str,
@@ -133,15 +160,21 @@ fn parse_alignment_bytes(
     arch: &ArchConfig,
     labels: &HashMap<String, u32>,
 ) -> u32 {
+    let first_arg = args
+        .split(',')
+        .next()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| panic!("{} expects an alignment value", directive));
     match directive {
         ".p2align" => {
-            let pow = parse_imm(args, arch, labels);
+            let pow = parse_imm(first_arg, arch, labels);
             if pow >= 32 {
                 panic!("Invalid .p2align exponent: {}", pow);
             }
             1u32 << pow
         }
-        ".align" | ".balign" => parse_imm(args, arch, labels),
+        ".align" | ".balign" => parse_imm(first_arg, arch, labels),
         _ => panic!("Not an alignment directive: {}", directive),
     }
 }
@@ -204,10 +237,30 @@ fn parse_string_literal(s: &str) -> Vec<u8> {
         }
         let esc = chars.next().unwrap_or_else(|| panic!("Unterminated escape sequence"));
         let byte = match esc {
+            '0'..='7' => {
+                let mut value = esc.to_digit(8).unwrap();
+                for _ in 0..2 {
+                    let next = chars.as_str().chars().next();
+                    if let Some(c) = next {
+                        if let Some(digit) = c.to_digit(8) {
+                            chars.next();
+                            value = (value << 3) + digit;
+                            continue;
+                        }
+                    }
+                    break;
+                }
+                value as u8
+            }
             'n' => b'\n',
             'r' => b'\r',
             't' => b'\t',
-            '0' => b'\0',
+            'x' => {
+                let h1 = chars.next().unwrap_or_else(|| panic!("Invalid hex escape"));
+                let h2 = chars.next().unwrap_or_else(|| panic!("Invalid hex escape"));
+                let hex = format!("{}{}", h1, h2);
+                u8::from_str_radix(&hex, 16).unwrap_or_else(|_| panic!("Invalid hex escape"))
+            }
             '\\' => b'\\',
             '"' => b'"',
             _ => panic!("Unsupported escape sequence: \\{}", esc),
@@ -239,6 +292,21 @@ fn data_directive_size(
         ".ascii" => parse_string_literal(args).len() as u32,
         ".asciz" => (parse_string_literal(args).len() as u32) + 1,
         _ => 0,
+    }
+}
+
+fn bss_allows_data_directive(
+    directive: &str,
+    args: &str,
+    arch: &ArchConfig,
+    labels: &HashMap<String, u32>,
+) -> bool {
+    match directive {
+        ".byte" | ".word" | ".long" => parse_list_args(args)
+            .into_iter()
+            .all(|arg| parse_imm(&arg, arch, labels) == 0),
+        ".space" | ".zero" => true,
+        _ => false,
     }
 }
 
@@ -453,7 +521,7 @@ fn assemble_lines_to_object(lines: &[String], arch: &ArchConfig) -> ObjectFile {
                         Section::Text => panic!("Data directive {} not allowed in .text", directive),
                         Section::Data => data_size += size,
                         Section::Bss => {
-                            if matches!(directive, ".ascii" | ".asciz" | ".byte" | ".word" | ".long") {
+                            if !bss_allows_data_directive(directive, args, arch, &dummy_labels) {
                                 panic!("Initialized data not allowed in .bss");
                             }
                             bss_size += size;
@@ -676,7 +744,7 @@ fn assemble_lines_with_sections(lines: &[String], arch: &ArchConfig) -> Assemble
                         Section::Text => panic!("Data directive {} not allowed in .text", directive),
                         Section::Data => data_size += size,
                         Section::Bss => {
-                            if matches!(directive, ".ascii" | ".asciz" | ".byte" | ".word" | ".long") {
+                            if !bss_allows_data_directive(directive, args, arch, &dummy_labels) {
                                 panic!("Initialized data not allowed in .bss");
                             }
                             bss_size += size;
@@ -865,5 +933,70 @@ here:
         assert!(!l.global);
         assert_eq!(l.section, Some(ObjSection::Bss));
         assert_eq!(imm(out.text[0]), 8);
+    }
+
+    #[test]
+    fn supports_file_directive_with_colon_in_path() {
+        let arch = arch();
+        let asm = r#"
+.file 1 "/tmp/demo:source.c"
+.text
+start:
+    mov r0, r0
+"#;
+        let out = assemble_string_with_sections(asm, &arch);
+        assert_eq!(out.text.len(), 1);
+    }
+
+    #[test]
+    fn supports_p2align_with_fill_argument() {
+        let arch = arch();
+        let asm = r#"
+.text
+    mov r1, r1
+    .p2align 2, 0x0
+    mov r2, r2
+"#;
+        let out = assemble_string_with_sections(asm, &arch);
+        assert_eq!(out.text.len(), 2);
+    }
+
+    #[test]
+    fn supports_zero_initialized_scalars_in_bss() {
+        let arch = arch();
+        let asm = r#"
+.bss
+z0: .byte 0, 0
+z1: .word 0
+z2: .long 0
+"#;
+        let out = assemble_string_with_sections(asm, &arch);
+        assert_eq!(out.bss_size, 8);
+    }
+
+    #[test]
+    fn supports_hash_inline_comments() {
+        let arch = arch();
+        let asm = r#"
+.bss
+z: .long 0                               # 0x0
+.text
+    mov r0, r0                           # nop-ish
+"#;
+        let out = assemble_string_with_sections(asm, &arch);
+        assert_eq!(out.bss_size, 4);
+        assert_eq!(out.text.len(), 1);
+    }
+
+    #[test]
+    fn parses_octal_string_escapes() {
+        let arch = arch();
+        let asm = r#"
+.data
+bytes:
+    .ascii "\001\000A"
+"#;
+        let out = assemble_string_with_sections(asm, &arch);
+        assert_eq!(out.data, vec![1, 0, b'A']);
     }
 }

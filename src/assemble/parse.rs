@@ -135,10 +135,18 @@ pub fn parse_operands(format: InstFormat, args: &[&str], arch: &ArchConfig, labe
         }
 
         InstFormat::I => {
-            if args.len() != 1 {
-                panic!("I format expects imm");
+            if args.len() == 1 {
+                return (0, 0, 0, parse_imm(args[0], arch, labels));
             }
-            (0, 0, 0, parse_imm(args[0], arch, labels))
+            if args.len() == 2 {
+                return (
+                    parse_reg(args[0], arch),
+                    0,
+                    0,
+                    parse_imm(args[1], arch, labels),
+                );
+            }
+            panic!("I format expects imm or rs, imm");
         }
 
         InstFormat::Rd => {
@@ -427,11 +435,15 @@ pub fn parse_operands_reloc(
         }
 
         InstFormat::I => {
-            if args.len() != 1 {
-                panic!("I format expects imm");
+            if args.len() == 1 {
+                let (imm, reloc) = parse_imm_reloc(args[0], arch, labels);
+                return (0, 0, 0, imm, reloc);
             }
-            let (imm, reloc) = parse_imm_reloc(args[0], arch, labels);
-            (0, 0, 0, imm, reloc)
+            if args.len() == 2 {
+                let (imm, reloc) = parse_imm_reloc(args[1], arch, labels);
+                return (parse_reg(args[0], arch), 0, 0, imm, reloc);
+            }
+            panic!("I format expects imm or rs, imm");
         }
 
         InstFormat::Rd => {
@@ -550,6 +562,9 @@ pub fn parse_imm(s: &str,  arch: &ArchConfig,labels: &HashMap<String, u32>) -> u
 
 fn parse_simple_expr(expr: &str, macros: &HashMap<String, u32>, labels: &HashMap<String,u32>) -> u32 {
     let expr = expr.trim();
+    if expr.is_empty() {
+        panic!("Invalid immediate or undefined label: '{}'", expr);
+    }
 
     if expr.starts_with("(") && expr.ends_with(")") {
         return parse_simple_expr(&expr[1..expr.len() - 1], macros, labels);
@@ -557,13 +572,16 @@ fn parse_simple_expr(expr: &str, macros: &HashMap<String, u32>, labels: &HashMap
 
     for op in ['+', '-'] {
         if let Some(pos) = expr.rfind(op) {
+            if pos == 0 {
+                continue;
+            }
             let left = &expr[..pos];
             let right = &expr[pos + 1..];
             let lv = parse_simple_expr(left, macros, labels);
             let rv = parse_simple_expr(right, macros, labels);
             return match op {
-                '+' => lv + rv,
-                '-' => lv - rv,
+                '+' => lv.wrapping_add(rv),
+                '-' => lv.wrapping_sub(rv),
                 _ => unreachable!(),
             };
         }
@@ -582,6 +600,14 @@ fn parse_simple_expr(expr: &str, macros: &HashMap<String, u32>, labels: &HashMap
         }
     }
 
+    if let Some(rest) = expr.strip_prefix('+') {
+        return parse_simple_expr(rest, macros, labels);
+    }
+    if let Some(rest) = expr.strip_prefix('-') {
+        let val = parse_simple_expr(rest, macros, labels);
+        return 0u32.wrapping_sub(val);
+    }
+
     if let Some(&val) = macros.get(expr) {
         return val;
     }
@@ -592,6 +618,17 @@ fn parse_simple_expr(expr: &str, macros: &HashMap<String, u32>, labels: &HashMap
 
     if let Some(hex) = expr.strip_prefix("0x") {
         return u32::from_str_radix(hex, 16).expect("Invalid hex immediate");
+    }
+
+    if let Ok(num) = expr.parse::<i64>() {
+        if num < i32::MIN as i64 || num > u32::MAX as i64 {
+            panic!("Immediate out of range: {}", expr);
+        }
+        return if num < 0 {
+            (num as i32) as u32
+        } else {
+            num as u32
+        };
     }
 
     expr.parse::<u32>().unwrap_or_else(|_| {
@@ -677,5 +714,25 @@ mod tests {
         let (imm, reloc) = parse_imm_reloc("a-b+4", &arch, &labels);
         assert_eq!(imm, 12);
         assert!(reloc.is_none());
+    }
+
+    #[test]
+    fn parse_imm_supports_negative_literals_and_expr() {
+        let arch = arch();
+        let labels = HashMap::new();
+        assert_eq!(parse_imm("-1", &arch, &labels), u32::MAX);
+        assert_eq!(parse_imm("-4+1", &arch, &labels), u32::MAX - 2);
+    }
+
+    #[test]
+    fn parse_i_format_supports_optional_condition_register() {
+        let arch = arch();
+        let labels = HashMap::new();
+        let args = vec!["r3", "10"];
+        let (rd, rs1, rs2, imm) = parse_operands(InstFormat::I, &args, &arch, &labels);
+        assert_eq!(rd, 3);
+        assert_eq!(rs1, 0);
+        assert_eq!(rs2, 0);
+        assert_eq!(imm, 10);
     }
 }

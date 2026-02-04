@@ -4,6 +4,8 @@ Currently aligned VM version: [1a4289b54d3e1dd5af290133e06df394673eb5ab](https:/
 
 This is the development toolchain for [lampvm](https://github.com/glowingstone124/lamp-vm).
 
+I am currently developing an LLVM backend to make program more fast and clean, so this project's C compiler may not being continued.
+
 # Compilation
 
 This project is written in Rust, so you can compile it easily using `cargo`:
