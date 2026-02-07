@@ -1,5 +1,10 @@
 # C Compiler Syntax Specification
 
+> The built-in C compiler (`cc`) is **deprecated**.
+> Please use the [**LLVM backend**](https://github.com/glowingstone124/lamp-vm) for new projects.
+> The `cc` path is kept only for compatibility and may be removed in a future release.
+
+
 This document describes the syntax accepted by the current compiler implementation in `src/compiler/tokenizer.rs` and `src/compiler/compiler.rs`. It is intentionally a **small C subset**.
 
 ## Output Format

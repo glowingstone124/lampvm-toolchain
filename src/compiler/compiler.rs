@@ -403,33 +403,33 @@ impl<'a> Codegen<'a> {
 
     fn emit_load_var(&mut self, ty: &Type, offset: i32) {
         if Self::is_char_type(ty) {
-            self.emit(format!("load r0, [r30 + {}]", offset));
+            self.emit(format!("load r0, r30, {}", offset));
         } else {
-            self.emit(format!("load32 r0, [r30 + {}]", offset));
+            self.emit(format!("load32 r0, r30, {}", offset));
         }
     }
 
     fn emit_store_var(&mut self, ty: &Type, offset: i32) {
         if Self::is_char_type(ty) {
-            self.emit(format!("store [r30 + {}], r0", offset));
+            self.emit(format!("store r0, r30, {}", offset));
         } else {
-            self.emit(format!("store32 [r30 + {}], r0", offset));
+            self.emit(format!("store32 r0, r30, {}", offset));
         }
     }
 
     fn emit_load_from_addr(&mut self, ty: &Type, addr_reg: &str) {
         if Self::is_char_type(ty) {
-            self.emit(format!("load r0, [{}]", addr_reg));
+            self.emit(format!("load r0, {}, 0", addr_reg));
         } else {
-            self.emit(format!("load32 r0, [{}]", addr_reg));
+            self.emit(format!("load32 r0, {}, 0", addr_reg));
         }
     }
 
     fn emit_store_to_addr(&mut self, ty: &Type, addr_reg: &str) {
         if Self::is_char_type(ty) {
-            self.emit(format!("store [{}], r0", addr_reg));
+            self.emit(format!("store r0, {}, 0", addr_reg));
         } else {
-            self.emit(format!("store32 [{}], r0", addr_reg));
+            self.emit(format!("store32 r0, {}, 0", addr_reg));
         }
     }
 
@@ -668,13 +668,13 @@ impl<'a> Codegen<'a> {
         self.emit("mov r9, r30"); // r9 old sp
         self.emit(format!("movi r8, {}", frame_size)); // r8 framesize
         self.emit("sub r30, r30, r8");
-        self.emit("store32 [r30+0], r9"); // save old sp
+        self.emit("store32 r9, r30, 0"); // save old sp
 
         let ret_struct = matches!(func.ret_type, Type::Struct(_));
         let arg_base = if ret_struct { 1 } else { 0 };
         if ret_struct {
             if let Some(sret_offset) = self.curr_sret_offset {
-                self.emit(format!("store32 [r30 + {}], r0", sret_offset));
+                self.emit(format!("store32 r0, r30, {}", sret_offset));
             }
         }
 
@@ -688,21 +688,21 @@ impl<'a> Codegen<'a> {
                     self.emit("add r1, r30, r1");
                     self.emit(format!("memcpy r1, r{}, {}", arg_index, ty.size_with(self.struct_defs)));
                 } else if Self::is_char_type(ty) {
-                    self.emit(format!("store [r30 + {}], r{}", offset, arg_index));
+                    self.emit(format!("store r{}, r30, {}", arg_index, offset));
                 } else {
-                    self.emit(format!("store32 [r30 + {}], r{}", offset, arg_index));
+                    self.emit(format!("store32 r{}, r30, {}", arg_index, offset));
                 }
             } else {
                 let stack_off = ((arg_index - 8) * 4) as i32;
-                self.emit(format!("load32 r0, [r9 + {}]", stack_off));
+                self.emit(format!("load32 r0, r9, {}", stack_off));
                 if matches!(ty, Type::Struct(_)) {
                     self.emit(format!("movi r1, {}", offset));
                     self.emit("add r1, r30, r1");
                     self.emit(format!("memcpy r1, r0, {}", ty.size_with(self.struct_defs)));
                 } else if Self::is_char_type(ty) {
-                    self.emit(format!("store [r30 + {}], r0", offset));
+                    self.emit(format!("store r0, r30, {}", offset));
                 } else {
-                    self.emit(format!("store32 [r30 + {}], r0", offset));
+                    self.emit(format!("store32 r0, r30, {}", offset));
                 }
             }
         }
@@ -714,7 +714,7 @@ impl<'a> Codegen<'a> {
         }
 
         self.emit(format!("{}:", ret_label));
-        self.emit("load32 r9, [r30 + 0]");
+        self.emit("load32 r9, r30, 0");
         self.emit("mov r30, r9");
         self.emit("ret");
 
@@ -954,7 +954,7 @@ impl<'a> Codegen<'a> {
                     self.emit("push r0");
                 }
                 SRetTarget::LoadOffset(off) => {
-                    self.emit(format!("load32 r0, [r30 + {}]", off));
+                    self.emit(format!("load32 r0, r30, {}", off));
                     self.emit("push r0");
                 }
             }
@@ -1020,7 +1020,7 @@ impl<'a> Codegen<'a> {
                         if let ExprKind::Call { name, args } = &e.kind {
                             self.gen_call(name, args, func, Some(SRetTarget::LoadOffset(sret_offset)));
                         } else {
-                            self.emit(format!("load32 r1, [r30 + {}]", sret_offset));
+                            self.emit(format!("load32 r1, r30, {}", sret_offset));
                             self.gen_struct_addr(e, func);
                             self.emit(format!(
                                 "memcpy r1, r0, {}",
@@ -1193,14 +1193,14 @@ impl<'a> Codegen<'a> {
                                 self.emit("mov r1, r0");
                                 for (i, b) in bytes.iter().enumerate() {
                                     self.emit(format!("movi r0, {}", *b as u32));
-                                    self.emit(format!("store [r1 + {}], r0", i));
+                                    self.emit(format!("store r0, r1, {}", i));
                                 }
                                 self.emit("movi r0, 0");
-                                self.emit(format!("store [r1 + {}], r0", bytes.len()));
+                                self.emit(format!("store r0, r1, {}", bytes.len()));
                                 if *n != 0 && needed < *n {
                                     for i in needed..*n {
                                         self.emit("movi r0, 0");
-                                        self.emit(format!("store [r1 + {}], r0", i));
+                                        self.emit(format!("store r0, r1, {}", i));
                                     }
                                 }
                                 continue;
@@ -1318,7 +1318,7 @@ impl<'a> Codegen<'a> {
                     self.cast_reg(&rty, &lty);
                     self.emit_store_to_addr(&lty, "r1");
                 } else {
-                    self.emit("store32 [r1], r0");
+                    self.emit("store32 r0, r1, 0");
                 }
             }
             ExprKind::Inc { expr, is_post } => {
@@ -2038,8 +2038,8 @@ mod tests {
     #[test]
     fn compile_char_byte_semantics() {
         let asm = compile_ok("int main(){char c; c=65; return c;}");
-        assert!(asm.contains("store ["));
-        assert!(asm.contains("load r0, [r30"));
+        assert!(asm.contains("store r0,"));
+        assert!(asm.contains("load r0, r30"));
     }
 
     #[test]
@@ -2078,7 +2078,7 @@ mod tests {
     fn compile_struct_and_member() {
         let asm = compile_ok("typedef struct { int a; char b; } Foo; int main(){Foo f; f.a=1; f.b=2; return f.a;}");
         assert!(asm.contains("store32"));
-        assert!(asm.contains("store ["));
+        assert!(asm.contains("store r0,"));
     }
 
     #[test]
@@ -2101,8 +2101,8 @@ mod tests {
     #[test]
     fn compile_many_params() {
         let asm = compile_ok("int foo(int a0,int a1,int a2,int a3,int a4,int a5,int a6,int a7,int a8,int a9){return a9;} int main(){return foo(0,1,2,3,4,5,6,7,8,9);}");
-        assert!(asm.contains("load32 r0, [r9 + 0]"));
-        assert!(asm.contains("load32 r0, [r9 + 4]"));
+        assert!(asm.contains("load32 r0, r9, 0"));
+        assert!(asm.contains("load32 r0, r9, 4"));
     }
 
     #[test]

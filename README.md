@@ -1,10 +1,12 @@
 # lampvm-toolchain
 
-Currently aligned VM version: [1a4289b54d3e1dd5af290133e06df394673eb5ab](https://github.com/glowingstone124/lamp-vm/commit/1a4289b54d3e1dd5af290133e06df394673eb5ab)
+Currently aligned VM version: [f7cf3534eed81454ed3f5db0a9097ed72920533d](https://github.com/glowingstone124/lamp-vm/commit/f7cf3534eed81454ed3f5db0a9097ed72920533d)
 
 This is the development toolchain for [lampvm](https://github.com/glowingstone124/lamp-vm).
 
-I am currently developing an LLVM backend to make program more fast and clean, so this project's C compiler may not being continued.
+> The built-in C compiler (`cc`) is **deprecated**.
+> Please use the [**LLVM backend**](https://github.com/glowingstone124/lamp-vm) for new projects.
+> The `cc` path is kept only for compatibility and may be removed in a future release.
 
 # Compilation
 
@@ -21,12 +23,12 @@ For assemble:
 ./bin asm --input program.asm --output program.bin
 ```
 
-For compile C code:
+For compile C code (deprecated):
 ```bash
 ./bin cc main.c
 ```
 
-Detailed information for C is in [document](/docs/CCompiler.md)
+Detailed information for the deprecated C compiler is in [document](/docs/CCompiler.md).
 
 The assembler requires a config.yml file to be present in the current working directory.
 

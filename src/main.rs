@@ -45,6 +45,7 @@ enum Commands {
         #[arg(long)]
         emit_obj: bool,
     },
+    #[command(about = "DEPRECATED: compile C source with the legacy frontend (use LLVM backend instead)")]
     Cc {
         input: String,
 
@@ -100,6 +101,8 @@ fn main() {
         }
 
         Commands::Cc { input, emit_obj, output } => {
+            eprintln!("[DEPRECATED] `cc` is deprecated and kept for compatibility.");
+            eprintln!("[DEPRECATED] Please use the LLVM backend for new projects.");
             println!("C compile mode: {}", input);
 
             let arch = load_or_generate_arch_config("config.yml");

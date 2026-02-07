@@ -66,6 +66,16 @@ pub enum Opcode {
     OP_XORI,
     OP_SHLI,
     OP_SHRI,
+    OP_CAS,
+    OP_XADD,
+    OP_XCHG,
+    OP_LDAR,
+    OP_STLR,
+    OP_FENCE,
+    OP_PAUSE,
+    OP_STARTAP,
+    OP_IPI,
+    OP_CPUID,
 }
 impl Opcode {
     pub fn parse(s: &str) -> Option<Self> {
@@ -132,6 +142,16 @@ impl Opcode {
             "XORI" => Some(Opcode::OP_XORI),
             "SHLI" => Some(Opcode::OP_SHLI),
             "SHRI" => Some(Opcode::OP_SHRI),
+            "CAS" => Some(Opcode::OP_CAS),
+            "XADD" => Some(Opcode::OP_XADD),
+            "XCHG" => Some(Opcode::OP_XCHG),
+            "LDAR" => Some(Opcode::OP_LDAR),
+            "STLR" => Some(Opcode::OP_STLR),
+            "FENCE" => Some(Opcode::OP_FENCE),
+            "PAUSE" => Some(Opcode::OP_PAUSE),
+            "STARTAP" => Some(Opcode::OP_STARTAP),
+            "IPI" => Some(Opcode::OP_IPI),
+            "CPUID" => Some(Opcode::OP_CPUID),
             _ => None,
         }
     }
@@ -182,7 +202,10 @@ impl Opcode {
             | Opcode::OP_ORI
             | Opcode::OP_XORI
             | Opcode::OP_SHLI
-            | Opcode::OP_SHRI => InstFormat::RdRsImm,
+            | Opcode::OP_SHRI
+            | Opcode::OP_LDAR
+            | Opcode::OP_STLR
+            | Opcode::OP_STARTAP => InstFormat::RdRsImm,
 
             Opcode::OP_JMP
             | Opcode::OP_JZ
@@ -195,14 +218,75 @@ impl Opcode {
             | Opcode::OP_JNC
             | Opcode::OP_CALL => InstFormat::I,
 
-            Opcode::OP_INC | Opcode::OP_PUSH | Opcode::OP_POP | Opcode::OP_INT => InstFormat::Rd,
+            Opcode::OP_INC
+            | Opcode::OP_PUSH
+            | Opcode::OP_POP
+            | Opcode::OP_INT
+            | Opcode::OP_CPUID => InstFormat::Rd,
 
-            Opcode::OP_STOREX32 | Opcode::OP_LOADX32 => InstFormat::RdRsRsImm,
+            Opcode::OP_STOREX32
+            | Opcode::OP_LOADX32
+            | Opcode::OP_CAS
+            | Opcode::OP_XADD
+            | Opcode::OP_XCHG => InstFormat::RdRsRsImm,
 
-            Opcode::OP_HALT | Opcode::OP_RET | Opcode::OP_IRET => InstFormat::None,
+            Opcode::OP_HALT
+            | Opcode::OP_RET
+            | Opcode::OP_IRET
+            | Opcode::OP_FENCE
+            | Opcode::OP_PAUSE => InstFormat::None,
+
+            Opcode::OP_IPI => InstFormat::RdRs,
 
             Opcode::OP_CMPI | Opcode::OP_MOVI => InstFormat::RdImm,
-            _ => panic!("Unknown opcode"),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::Opcode;
+    use crate::assemble::inst::InstFormat;
+
+    #[test]
+    fn parses_new_smp_atomic_opcodes() {
+        assert_eq!(Opcode::parse("CAS"), Some(Opcode::OP_CAS));
+        assert_eq!(Opcode::parse("XADD"), Some(Opcode::OP_XADD));
+        assert_eq!(Opcode::parse("XCHG"), Some(Opcode::OP_XCHG));
+        assert_eq!(Opcode::parse("LDAR"), Some(Opcode::OP_LDAR));
+        assert_eq!(Opcode::parse("STLR"), Some(Opcode::OP_STLR));
+        assert_eq!(Opcode::parse("FENCE"), Some(Opcode::OP_FENCE));
+        assert_eq!(Opcode::parse("PAUSE"), Some(Opcode::OP_PAUSE));
+        assert_eq!(Opcode::parse("STARTAP"), Some(Opcode::OP_STARTAP));
+        assert_eq!(Opcode::parse("IPI"), Some(Opcode::OP_IPI));
+        assert_eq!(Opcode::parse("CPUID"), Some(Opcode::OP_CPUID));
+    }
+
+    #[test]
+    fn new_opcode_values_match_vm_isa() {
+        assert_eq!(Opcode::OP_CAS as u8, 0x3F);
+        assert_eq!(Opcode::OP_XADD as u8, 0x40);
+        assert_eq!(Opcode::OP_XCHG as u8, 0x41);
+        assert_eq!(Opcode::OP_LDAR as u8, 0x42);
+        assert_eq!(Opcode::OP_STLR as u8, 0x43);
+        assert_eq!(Opcode::OP_FENCE as u8, 0x44);
+        assert_eq!(Opcode::OP_PAUSE as u8, 0x45);
+        assert_eq!(Opcode::OP_STARTAP as u8, 0x46);
+        assert_eq!(Opcode::OP_IPI as u8, 0x47);
+        assert_eq!(Opcode::OP_CPUID as u8, 0x48);
+    }
+
+    #[test]
+    fn formats_for_new_opcodes_are_correct() {
+        assert_eq!(Opcode::OP_CAS.format(), InstFormat::RdRsRsImm);
+        assert_eq!(Opcode::OP_XADD.format(), InstFormat::RdRsRsImm);
+        assert_eq!(Opcode::OP_XCHG.format(), InstFormat::RdRsRsImm);
+        assert_eq!(Opcode::OP_LDAR.format(), InstFormat::RdRsImm);
+        assert_eq!(Opcode::OP_STLR.format(), InstFormat::RdRsImm);
+        assert_eq!(Opcode::OP_FENCE.format(), InstFormat::None);
+        assert_eq!(Opcode::OP_PAUSE.format(), InstFormat::None);
+        assert_eq!(Opcode::OP_STARTAP.format(), InstFormat::RdRsImm);
+        assert_eq!(Opcode::OP_IPI.format(), InstFormat::RdRs);
+        assert_eq!(Opcode::OP_CPUID.format(), InstFormat::Rd);
     }
 }
